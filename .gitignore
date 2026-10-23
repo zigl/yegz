@@ -1,5 +1,6 @@
 # Rust / Cargo build outputs
 target/
+dist/
 debug/
 *.rs.bk
 *.pdb
