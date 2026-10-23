@@ -530,6 +530,23 @@ impl Editor {
         self.save_session_state();
     }
 
+    fn close_other_tabs(&mut self, keep_idx: usize) {
+        if keep_idx >= self.tabs.len() {
+            return;
+        }
+        let keep_tab = self.tabs.remove(keep_idx);
+        let mut new_tabs = Vec::new();
+        for t in self.tabs.drain(..) {
+            if t.dirty() {
+                new_tabs.push(t);
+            }
+        }
+        new_tabs.insert(0, keep_tab);
+        self.tabs = new_tabs;
+        self.active = 0;
+        self.save_session_state();
+    }
+
     fn open_folder_dialog(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
             self.set_root(Some(&dir));
@@ -714,6 +731,10 @@ impl Editor {
 
         // Code editing shortcuts:
         let id = self.editor_id();
+        let is_editor_focused = ctx.memory(|m| match m.focused() {
+            Some(focused_id) => focused_id == id,
+            None => true,
+        });
         let state = egui::TextEdit::load_state(ctx, id);
 
         if let Some(mut state) = state {
@@ -759,21 +780,40 @@ impl Editor {
             }
 
             // Tab / Shift-Tab Indent & Dedent
-            if hit(Modifiers::NONE, Key::Tab) && cursor_start != cursor_end {
+            if is_editor_focused && hit(Modifiers::NONE, Key::Tab) {
                 let tab = &mut self.tabs[self.active];
-                let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, false, self.settings.tab_size);
-                tab.text = new_text;
-                tab.recalculate_line_numbers();
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
-                state.clone().store(ctx, id);
+                if !tab.read_only {
+                    if cursor_start != cursor_end {
+                        let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, false, self.settings.tab_size);
+                        tab.text = new_text;
+                        tab.recalculate_line_numbers();
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
+                        state.clone().store(ctx, id);
+                    } else {
+                        let indent = " ".repeat(self.settings.tab_size);
+                        let chars: Vec<char> = tab.text.chars().collect();
+                        let idx = cursor_start.min(chars.len());
+                        let mut new_text = String::with_capacity(tab.text.len() + indent.len());
+                        new_text.extend(chars[..idx].iter());
+                        new_text.push_str(&indent);
+                        new_text.extend(chars[idx..].iter());
+                        tab.text = new_text;
+                        tab.recalculate_line_numbers();
+                        let new_pos = idx + self.settings.tab_size;
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_pos))));
+                        state.clone().store(ctx, id);
+                    }
+                }
             }
-            if hit(Modifiers::SHIFT, Key::Tab) {
+            if is_editor_focused && hit(Modifiers::SHIFT, Key::Tab) {
                 let tab = &mut self.tabs[self.active];
-                let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, true, self.settings.tab_size);
-                tab.text = new_text;
-                tab.recalculate_line_numbers();
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
-                state.clone().store(ctx, id);
+                if !tab.read_only {
+                    let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, true, self.settings.tab_size);
+                    tab.text = new_text;
+                    tab.recalculate_line_numbers();
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
+                    state.clone().store(ctx, id);
+                }
             }
 
             // Auto-indent on Enter
@@ -999,28 +1039,91 @@ impl Editor {
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
-        egui::ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (i, tab) in self.tabs.iter().enumerate() {
-                    let title = format!("{}{}", tab.title(), if tab.dirty() { " ●" } else { "" });
-                    let r = ui.selectable_label(i == self.active, title);
-                    let r = match &tab.path {
-                        Some(p) => r.on_hover_text(p.display().to_string()),
-                        None => r,
-                    };
-                    if r.clicked() {
-                        self.active = i;
+        let mut close_others = None;
+        let mut save_idx = None;
+        let mut rename_idx = None;
+
+        egui::ScrollArea::horizontal()
+            .id_salt("tabs")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, tab) in self.tabs.iter().enumerate() {
+                        let is_active = i == self.active;
+                        let title = format!("{}{}", tab.title(), if tab.dirty() { " ●" } else { "" });
+                        let r = ui.selectable_label(is_active, title);
+                        let r = match &tab.path {
+                            Some(p) => r.on_hover_text(p.display().to_string()),
+                            None => r,
+                        };
+                        if r.clicked() {
+                            self.active = i;
+                        }
+                        if r.double_clicked() {
+                            rename_idx = Some(i);
+                        }
+                        if r.middle_clicked() {
+                            close = Some(i);
+                        }
+
+                        r.context_menu(|ui| {
+                            if ui.button("✏ Rename…").clicked() {
+                                rename_idx = Some(i);
+                                ui.close();
+                            }
+                            if ui.button("💾 Save").clicked() {
+                                save_idx = Some((i, false));
+                                ui.close();
+                            }
+                            if ui.button("💾 Save As…").clicked() {
+                                save_idx = Some((i, true));
+                                ui.close();
+                            }
+                            if let Some(p) = &tab.path {
+                                ui.separator();
+                                if ui.button("Reveal in Finder").clicked() {
+                                    let _ = std::process::Command::new("open").arg("-R").arg(p).spawn();
+                                    ui.close();
+                                }
+                                if ui.button("Copy Full Path").clicked() {
+                                    ui.ctx().copy_text(p.display().to_string());
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Close Tab").clicked() {
+                                close = Some(i);
+                                ui.close();
+                            }
+                            if ui.button("Close Other Tabs").clicked() {
+                                close_others = Some(i);
+                                ui.close();
+                            }
+                        });
+
+                        if ui.small_button("×").on_hover_text("Close Tab (⌘W)").clicked() {
+                            close = Some(i);
+                        }
+                        ui.separator();
                     }
-                    if r.middle_clicked() {
-                        close = Some(i);
-                    }
-                    if ui.small_button("×").clicked() {
-                        close = Some(i);
-                    }
-                    ui.separator();
-                }
+                });
             });
-        });
+
+        if let Some((idx, save_as)) = save_idx {
+            self.save(idx, save_as);
+        }
+        if let Some(idx) = rename_idx {
+            if let Some(p) = self.tabs.get(idx).and_then(|t| t.path.clone()) {
+                self.tree_modal = Some(TreeModal::Rename(p.clone()));
+                self.modal_input = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            } else {
+                self.save(idx, true);
+            }
+        }
+        if let Some(keep_idx) = close_others {
+            self.close_other_tabs(keep_idx);
+        }
         if let Some(i) = close {
             self.request_close(i);
         }
