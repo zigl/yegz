@@ -1043,6 +1043,8 @@ impl Editor {
         let mut save_idx = None;
         let mut rename_idx = None;
 
+        ui.spacing_mut().item_spacing.x = 3.0;
+
         egui::ScrollArea::horizontal()
             .id_salt("tabs")
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -1051,23 +1053,67 @@ impl Editor {
                 ui.horizontal(|ui| {
                     for (i, tab) in self.tabs.iter().enumerate() {
                         let is_active = i == self.active;
-                        let title = format!("{}{}", tab.title(), if tab.dirty() { " ●" } else { "" });
-                        let r = ui.selectable_label(is_active, title);
-                        let r = match &tab.path {
-                            Some(p) => r.on_hover_text(p.display().to_string()),
-                            None => r,
+                        let bg = if is_active {
+                            ui.visuals().extreme_bg_color
+                        } else {
+                            ui.visuals().panel_fill
                         };
-                        if r.clicked() {
+
+                        let stroke = if is_active {
+                            egui::Stroke::new(1.0, ui.visuals().selection.stroke.color)
+                        } else {
+                            egui::Stroke::new(1.0, ui.visuals().window_stroke.color.gamma_multiply(0.5))
+                        };
+
+                        let frame = egui::Frame::NONE
+                            .fill(bg)
+                            .stroke(stroke)
+                            .corner_radius(egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 })
+                            .inner_margin(egui::Margin::symmetric(8, 4));
+
+                        let frame_res = frame.show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+
+                                let title_text = RichText::new(tab.title())
+                                    .color(if is_active { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
+                                ui.add(egui::Label::new(title_text).selectable(false));
+
+                                if tab.dirty() {
+                                    ui.colored_label(Color32::from_rgb(229, 192, 123), "●");
+                                }
+
+                                ui.add(
+                                    egui::Button::new(RichText::new("×").size(12.0))
+                                        .frame(false)
+                                        .min_size(egui::vec2(12.0, 12.0)),
+                                )
+                                .on_hover_text("Close Tab (⌘W)")
+                            })
+                            .inner
+                        });
+
+                        let close_btn = frame_res.inner;
+                        let tab_r = frame_res.response.interact(egui::Sense::click());
+                        let tab_r = match &tab.path {
+                            Some(p) => tab_r.on_hover_text(p.display().to_string()),
+                            None => tab_r,
+                        };
+
+                        if close_btn.clicked() {
+                            close = Some(i);
+                        } else if tab_r.clicked() {
                             self.active = i;
                         }
-                        if r.double_clicked() {
+
+                        if tab_r.double_clicked() && !close_btn.clicked() {
                             rename_idx = Some(i);
                         }
-                        if r.middle_clicked() {
+                        if tab_r.middle_clicked() {
                             close = Some(i);
                         }
 
-                        r.context_menu(|ui| {
+                        tab_r.context_menu(|ui| {
                             if ui.button("✏ Rename…").clicked() {
                                 rename_idx = Some(i);
                                 ui.close();
@@ -1101,11 +1147,21 @@ impl Editor {
                                 ui.close();
                             }
                         });
+                    }
 
-                        if ui.small_button("×").on_hover_text("Close Tab (⌘W)").clicked() {
-                            close = Some(i);
-                        }
-                        ui.separator();
+                    // "+" button to create a new tab file
+                    ui.add_space(2.0);
+                    let add_tab = ui.add(
+                        egui::Button::new(RichText::new("+").size(14.0).strong())
+                            .frame(true)
+                            .min_size(egui::vec2(22.0, 20.0)),
+                    )
+                    .on_hover_text("New File (⌘N)");
+
+                    if add_tab.clicked() {
+                        self.tabs.push(Tab::untitled());
+                        self.active = self.tabs.len() - 1;
+                        self.save_session_state();
                     }
                 });
             });
