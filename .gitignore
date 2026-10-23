@@ -1,3 +1,30 @@
-/target
+# Rust / Cargo build outputs
+target/
+debug/
+*.rs.bk
+*.pdb
+
+# macOS system files
 .DS_Store
-*.iconset
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# macOS App & icon build intermediates
+*.iconset/
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+
+# Environment & temporary files
+.env
+.env.*
+*.log
