@@ -38,7 +38,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let _ = eframe::run_native(
         "Yegz",
         options,
         Box::new(move |cc| {
@@ -46,7 +46,8 @@ fn main() -> eframe::Result {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             Ok(Box::new(Editor::new(arg, session, cc.egui_ctx.clone())))
         }),
-    )
+    );
+    std::process::exit(0);
 }
 
 fn apply_theme(ctx: &egui::Context, settings: &Settings) {
@@ -691,6 +692,14 @@ impl Editor {
         if hit(cmd, Key::W) {
             self.request_close(self.active);
         }
+        if hit(cmd, Key::Q) {
+            if self.tabs.iter().any(Tab::dirty) {
+                self.pending = Some(Pending::Quit);
+            } else {
+                self.save_session_state();
+                std::process::exit(0);
+            }
+        }
 
         // Sidebar
         if hit(cmd, Key::B) || hit(cmd, Key::Backslash) {
@@ -1073,7 +1082,7 @@ impl Editor {
 
                         let frame_res = frame.show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.spacing_mut().item_spacing.x = 4.0;
 
                                 let title_text = RichText::new(tab.title())
                                     .color(if is_active { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
@@ -1084,9 +1093,9 @@ impl Editor {
                                 }
 
                                 ui.add(
-                                    egui::Button::new(RichText::new("×").size(12.0))
+                                    egui::Button::new(RichText::new("×").size(13.0))
                                         .frame(false)
-                                        .min_size(egui::vec2(12.0, 12.0)),
+                                        .min_size(egui::vec2(18.0, 16.0)),
                                 )
                                 .on_hover_text("Close Tab (⌘W)")
                             })
@@ -1100,13 +1109,19 @@ impl Editor {
                             None => tab_r,
                         };
 
-                        if close_btn.clicked() {
+                        let click_pos = ui.input(|i| i.pointer.interact_pos().or(i.pointer.latest_pos()));
+                        let clicked_on_close = click_pos.map_or(false, |pos| close_btn.rect.expand(2.0).contains(pos));
+                        let close_clicked = close_btn.clicked()
+                            || (tab_r.clicked() && clicked_on_close)
+                            || (ui.input(|i| i.pointer.primary_clicked()) && clicked_on_close);
+
+                        if close_clicked {
                             close = Some(i);
                         } else if tab_r.clicked() {
                             self.active = i;
                         }
 
-                        if tab_r.double_clicked() && !close_btn.clicked() {
+                        if tab_r.double_clicked() && !clicked_on_close {
                             rename_idx = Some(i);
                         }
                         if tab_r.middle_clicked() {
@@ -1880,13 +1895,13 @@ impl Editor {
                 if all_saved {
                     self.allow_quit = true;
                     self.save_session_state();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    std::process::exit(0);
                 }
             }
             (Pending::Quit, 1) => {
                 self.allow_quit = true;
                 self.save_session_state();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                std::process::exit(0);
             }
             _ => {}
         }
@@ -1925,6 +1940,7 @@ impl eframe::App for Editor {
                 self.pending = Some(Pending::Quit);
             } else {
                 self.save_session_state();
+                std::process::exit(0);
             }
         }
 

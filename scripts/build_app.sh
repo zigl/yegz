@@ -43,6 +43,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <key>NSAutomaticTouchBarItemsEnabled</key>
+    <false/>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
