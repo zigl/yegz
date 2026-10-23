@@ -97,13 +97,42 @@ fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     style.visuals.window_fill = panel;
     style.visuals.extreme_bg_color = bg;
     style.visuals.widgets.noninteractive.bg_fill = panel;
-    style.visuals.widgets.inactive.bg_fill = panel;
+
+    let btn_bg = if settings.theme.is_dark() {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 12)
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 10)
+    };
+    let btn_hover = if settings.theme.is_dark() {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 24)
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 18)
+    };
+    let btn_active = if settings.theme.is_dark() {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 38)
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 28)
+    };
+
+    style.visuals.widgets.inactive.bg_fill = btn_bg;
+    style.visuals.widgets.hovered.bg_fill = btn_hover;
+    style.visuals.widgets.active.bg_fill = btn_active;
+    style.visuals.widgets.open.bg_fill = btn_hover;
+
+    style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(4);
+    style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(4);
+    style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(4);
+    style.visuals.widgets.open.corner_radius = egui::CornerRadius::same(4);
+
     style.visuals.widgets.noninteractive.fg_stroke.color = text;
     style.visuals.widgets.inactive.fg_stroke.color = text;
     style.visuals.selection.bg_fill = select_bg;
     style.visuals.selection.stroke.color = select_stroke;
     style.visuals.hyperlink_color = select_stroke;
     style.visuals.window_stroke.color = border;
+
+    style.spacing.button_padding = egui::vec2(7.0, 3.5);
+    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
 
     style.text_styles.insert(
         egui::TextStyle::Monospace,
@@ -885,7 +914,7 @@ impl Editor {
 
                 let response = egui::CollapsingHeader::new(label)
                     .id_salt(&e.path)
-                    .default_open(false)
+                    .default_open(e.name == "src")
                     .show(ui, |ui| self.tree(ui, &e.path, to_open, open_paths));
 
                 response.header_response.context_menu(|ui| {
@@ -893,32 +922,54 @@ impl Editor {
                 });
             } else {
                 let active = open_paths.contains(&e.path);
-                let badge = match git_status {
-                    Some(FileGitStatus::Modified) => " M",
-                    Some(FileGitStatus::Untracked) => " U",
-                    Some(FileGitStatus::Staged) => " A",
-                    Some(FileGitStatus::Deleted) => " D",
-                    None => "",
+                let bg = if active {
+                    Color32::from_rgba_unmultiplied(97, 175, 239, 38)
+                } else {
+                    Color32::TRANSPARENT
                 };
 
-                let mut text = RichText::new(format!("📄 {}{badge}", e.name));
-                if let Some(status) = git_status {
-                    match status {
-                        FileGitStatus::Modified => text = text.color(Color32::from_rgb(229, 192, 123)),
-                        FileGitStatus::Untracked => text = text.color(Color32::from_rgb(152, 195, 121)),
-                        FileGitStatus::Staged => text = text.color(Color32::from_rgb(97, 175, 239)),
-                        FileGitStatus::Deleted => text = text.color(Color32::from_rgb(224, 108, 117)),
-                    }
-                } else if dim {
-                    text = text.color(Color32::GRAY);
-                }
+                let frame = egui::Frame::NONE
+                    .fill(bg)
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(egui::Margin::symmetric(4, 3));
 
-                let response = ui.selectable_label(active, text);
-                if response.clicked() {
+                let frame_res = frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let text_color = if active {
+                            ui.visuals().strong_text_color()
+                        } else if dim {
+                            Color32::GRAY
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        let mut text = RichText::new(format!("📄 {}", e.name)).color(text_color);
+                        if active {
+                            text = text.strong();
+                        }
+                        let label_resp = ui.label(text);
+
+                        if let Some(status) = git_status {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let (badge, color) = match status {
+                                    FileGitStatus::Modified => ("M", Color32::from_rgb(209, 154, 102)),
+                                    FileGitStatus::Untracked => ("U", Color32::from_rgb(152, 195, 121)),
+                                    FileGitStatus::Staged => ("A", Color32::from_rgb(97, 175, 239)),
+                                    FileGitStatus::Deleted => ("D", Color32::from_rgb(224, 108, 117)),
+                                };
+                                ui.label(RichText::new(badge).small().strong().color(color));
+                            });
+                        }
+                        label_resp
+                    });
+                });
+
+                let resp = frame_res.response.interact(egui::Sense::click());
+                if resp.clicked() {
                     *to_open = Some(e.path.clone());
                 }
-
-                response.context_menu(|ui| {
+                resp.context_menu(|ui| {
                     self.context_menu_for_path(ui, &e.path, false);
                 });
             }
@@ -971,8 +1022,12 @@ impl Editor {
         };
 
         ui.horizontal(|ui| {
-            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
-            ui.label(RichText::new(name).strong()).on_hover_text(root.display().to_string());
+            ui.label(
+                RichText::new("PROJECT EXPLORER")
+                    .size(11.0)
+                    .strong()
+                    .color(Color32::from_rgb(130, 140, 155)),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("⟳").on_hover_text("Refresh").clicked() {
                     self.dir_cache.clear();
@@ -981,7 +1036,9 @@ impl Editor {
                 }
             });
         });
+        ui.add_space(3.0);
         ui.separator();
+        ui.add_space(3.0);
 
         let active_path: HashSet<PathBuf> = self.tabs.get(self.active).and_then(|t| t.path.clone()).into_iter().collect();
         let mut to_open = None;
@@ -996,12 +1053,8 @@ impl Editor {
 
     fn main_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = 4.0;
 
-            if ui.button("📄 New").on_hover_text("New Tab (⌘N)").clicked() {
-                self.tabs.push(Tab::untitled());
-                self.active = self.tabs.len() - 1;
-            }
             if ui.button("📂 Open").on_hover_text("Open File (⌘O)").clicked() {
                 self.open_file_dialog();
             }
@@ -1014,11 +1067,10 @@ impl Editor {
                 self.save(self.active, false);
             }
 
+            ui.add_space(2.0);
             ui.separator();
+            ui.add_space(2.0);
 
-            if ui.button("⚡ Quick Open").on_hover_text("Fuzzy File Finder (⌘P)").clicked() {
-                self.fuzzy.open_palette();
-            }
             if ui.button("🔍 Find").on_hover_text("Find & Replace in File (⌘F)").clicked() {
                 self.find_open = !self.find_open;
                 self.find_focus = self.find_open;
@@ -1026,13 +1078,20 @@ impl Editor {
             if ui.button("🔎 Search").on_hover_text("Search across all files (⌘⇧F)").clicked() {
                 self.project_search.open = !self.project_search.open;
             }
+            if ui.button("🎯 Quick Open").on_hover_text("Fuzzy File Finder (⌘P)").clicked() {
+                self.fuzzy.open_palette();
+            }
 
+            ui.add_space(2.0);
             ui.separator();
+            ui.add_space(2.0);
 
             let sidebar_label = if self.show_sidebar { "◧ Sidebar" } else { "◨ Sidebar" };
             if ui.button(sidebar_label).on_hover_text("Toggle File Tree Sidebar (⌘B)").clicked() {
                 self.show_sidebar = !self.show_sidebar;
             }
+
+            self.language_picker(ui);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("⚙ Settings").on_hover_text("Preferences & Themes (⌘,)").clicked() {
@@ -1040,7 +1099,6 @@ impl Editor {
                 }
                 if let Some(ref branch) = self.git.branch {
                     ui.label(RichText::new(format!(" {branch}")).small().color(Color32::from_rgb(97, 175, 239)));
-                    ui.separator();
                 }
             });
         });
@@ -1052,7 +1110,7 @@ impl Editor {
         let mut save_idx = None;
         let mut rename_idx = None;
 
-        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.spacing_mut().item_spacing.x = 4.0;
 
         egui::ScrollArea::horizontal()
             .id_salt("tabs")
@@ -1065,27 +1123,31 @@ impl Editor {
                         let bg = if is_active {
                             ui.visuals().extreme_bg_color
                         } else {
-                            ui.visuals().panel_fill
+                            Color32::TRANSPARENT
                         };
 
                         let stroke = if is_active {
-                            egui::Stroke::new(1.0, ui.visuals().selection.stroke.color)
+                            egui::Stroke::new(1.0, ui.visuals().window_stroke.color.gamma_multiply(0.8))
                         } else {
-                            egui::Stroke::new(1.0, ui.visuals().window_stroke.color.gamma_multiply(0.5))
+                            egui::Stroke::NONE
                         };
 
                         let frame = egui::Frame::NONE
                             .fill(bg)
                             .stroke(stroke)
-                            .corner_radius(egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 })
-                            .inner_margin(egui::Margin::symmetric(8, 4));
+                            .corner_radius(egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 })
+                            .inner_margin(egui::Margin::symmetric(10, 5));
 
                         let frame_res = frame.show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.spacing_mut().item_spacing.x = 6.0;
 
-                                let title_text = RichText::new(tab.title())
-                                    .color(if is_active { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
+                                let mut title_text = RichText::new(tab.title());
+                                if is_active {
+                                    title_text = title_text.strong().color(ui.visuals().strong_text_color());
+                                } else {
+                                    title_text = title_text.color(ui.visuals().text_color().gamma_multiply(0.75));
+                                }
                                 ui.add(egui::Label::new(title_text).selectable(false));
 
                                 if tab.dirty() {
@@ -1095,7 +1157,7 @@ impl Editor {
                                 ui.add(
                                     egui::Button::new(RichText::new("×").size(13.0))
                                         .frame(false)
-                                        .min_size(egui::vec2(18.0, 16.0)),
+                                        .min_size(egui::vec2(16.0, 16.0)),
                                 )
                                 .on_hover_text("Close Tab (⌘W)")
                             })
@@ -1167,11 +1229,11 @@ impl Editor {
                     // "+" button to create a new tab file
                     ui.add_space(2.0);
                     let add_tab = ui.add(
-                        egui::Button::new(RichText::new("+").size(14.0).strong())
-                            .frame(true)
+                        egui::Button::new(RichText::new("+").size(15.0).strong())
+                            .frame(false)
                             .min_size(egui::vec2(22.0, 20.0)),
                     )
-                    .on_hover_text("New File (⌘N)");
+                    .on_hover_text("New Tab (⌘N)");
 
                     if add_tab.clicked() {
                         self.tabs.push(Tab::untitled());
@@ -1382,7 +1444,8 @@ impl Editor {
 
     fn language_picker(&mut self, ui: &mut egui::Ui) {
         let current = self.tabs[self.active].syntax.clone();
-        ui.menu_button(RichText::new(&current).small(), |ui| {
+        let label = RichText::new(format!("{current} ▾")).strong().color(Color32::from_rgb(97, 175, 239));
+        ui.menu_button(label, |ui| {
             let r = ui.add(egui::TextEdit::singleline(&mut self.lang_filter).hint_text("Filter languages…").desired_width(200.0));
             r.request_focus();
             ui.separator();
@@ -1409,7 +1472,6 @@ impl Editor {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.active];
-        let path = tab.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into());
         let read_only = tab.read_only && matches!(tab.view, View::Text);
         let media_info = match &tab.view {
             View::Text => None,
@@ -1417,41 +1479,55 @@ impl Editor {
             View::Pdf(v) => Some(v.info()),
         };
 
+        let sep = RichText::new("|").color(ui.visuals().text_color().gamma_multiply(0.25));
+
         ui.horizontal(|ui| {
-            ui.label(RichText::new(path).small());
+            ui.spacing_mut().item_spacing.x = 8.0;
+
+            let (l, c, bracket) = CURSOR.with(|c| *c.borrow());
+            ui.label(RichText::new(format!("Ln {l}, Col {c}")).small());
+
+            ui.label(sep.clone());
+            ui.label(RichText::new("Spaces: 4").small());
+
+            ui.label(sep.clone());
+            ui.label(RichText::new("UTF-8").small());
+
             if read_only {
+                ui.label(sep.clone());
                 ui.label(RichText::new("read-only").small().color(Color32::from_rgb(224, 108, 117)));
             }
+
+            if let Some(b) = bracket {
+                ui.label(sep.clone());
+                ui.label(RichText::new(format!("Bracket @ {b}")).small().color(Color32::from_rgb(97, 175, 239)));
+            }
+
             if !self.status.is_empty() {
-                ui.separator();
+                ui.label(sep.clone());
                 ui.label(RichText::new(&self.status).small().color(Color32::from_rgb(229, 192, 123)));
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("⚙").on_hover_text("Settings (⌘,)").clicked() {
-                    self.settings_open = !self.settings_open;
-                }
-
-                if let Some(ref branch) = self.git.branch {
-                    ui.separator();
-                    ui.label(RichText::new(format!(" {branch}")).small().color(Color32::from_rgb(97, 175, 239)));
-                }
+                ui.spacing_mut().item_spacing.x = 8.0;
 
                 if let Some(info) = media_info {
-                    ui.separator();
                     ui.label(RichText::new(info).small());
                     return;
                 }
 
-                ui.separator();
-                self.language_picker(ui);
-                ui.separator();
-                let (l, c, bracket) = CURSOR.with(|c| *c.borrow());
-                if let Some(b) = bracket {
-                    ui.label(RichText::new(format!("Bracket @ {b}")).small().color(Color32::from_rgb(97, 175, 239)));
-                    ui.separator();
+                let syntax_label = format!("{} · Two-Face Highlighting", tab.syntax);
+                ui.label(RichText::new(syntax_label).small());
+
+                if self.git.branch.is_some() {
+                    let has_changes = !self.git.file_statuses.is_empty();
+                    if has_changes {
+                        ui.label(RichText::new("Git: modified").small().color(Color32::from_rgb(229, 192, 123)));
+                    } else {
+                        ui.label(RichText::new("Git: clean").small().color(Color32::from_rgb(152, 195, 121)));
+                    }
+                    ui.label(sep.clone());
                 }
-                ui.label(RichText::new(format!("Ln {l}, Col {c}")).small());
             });
         });
     }
@@ -1958,21 +2034,49 @@ impl eframe::App for Editor {
         let title = format!("{}{} — Yegz", if tab.dirty() { "● " } else { "" }, tab.title());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
 
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        egui::Panel::bottom("status")
+            .frame(
+                egui::Frame::NONE
+                    .fill(ui.visuals().panel_fill.gamma_multiply(0.9))
+                    .stroke(egui::Stroke::new(1.0, ui.visuals().window_stroke.color.gamma_multiply(0.4)))
+                    .inner_margin(egui::Margin::symmetric(12, 5)),
+            )
+            .show(ui, |ui| self.status_bar(ui));
 
         if self.show_sidebar {
             egui::Panel::left("tree")
                 .resizable(true)
                 .default_size(self.sidebar_width)
-                .size_range(120.0..=600.0)
+                .size_range(140.0..=600.0)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(ui.visuals().panel_fill)
+                        .stroke(egui::Stroke::new(1.0, ui.visuals().window_stroke.color.gamma_multiply(0.4)))
+                        .inner_margin(egui::Margin::symmetric(10, 8)),
+                )
                 .show(ui, |ui| {
                     self.sidebar_width = ui.available_width();
                     self.sidebar(ui);
                 });
         }
 
-        egui::Panel::top("main_toolbar").show(ui, |ui| self.main_toolbar(ui));
-        egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
+        egui::Panel::top("main_toolbar")
+            .frame(
+                egui::Frame::NONE
+                    .fill(ui.visuals().panel_fill)
+                    .stroke(egui::Stroke::new(1.0, ui.visuals().window_stroke.color.gamma_multiply(0.4)))
+                    .inner_margin(egui::Margin::symmetric(10, 5)),
+            )
+            .show(ui, |ui| self.main_toolbar(ui));
+
+        egui::Panel::top("tabs")
+            .frame(
+                egui::Frame::NONE
+                    .fill(ui.visuals().panel_fill.gamma_multiply(0.8))
+                    .stroke(egui::Stroke::new(1.0, ui.visuals().window_stroke.color.gamma_multiply(0.4)))
+                    .inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 0 }),
+            )
+            .show(ui, |ui| self.tab_bar(ui));
 
         if self.find_open {
             egui::Panel::bottom("find").show(ui, |ui| self.find_bar(ui));

@@ -8,7 +8,7 @@
 
 **A lightweight, Rust-powered workspace for code, text, and everything in between.**
 
-[Features](#features) · [Getting started](#getting-started) · [Roadmap](#roadmap)
+[Website (yegz.com)](https://yegz.com) · [Features](#features) · [Getting started](#getting-started) · [Roadmap](#roadmap)
 
 </div>
 

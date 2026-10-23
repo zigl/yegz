@@ -2,6 +2,12 @@
 name = "yegz"
 version = "0.1.0"
 edition = "2024"
+description = "A powerful, lightweight, Atom-inspired code and file editor built in Rust"
+homepage = "https://yegz.com"
+repository = "https://github.com/zigl/yegz"
+license = "MIT"
+keywords = ["editor", "code-editor", "markdown", "rust", "syntax-highlighting"]
+categories = ["development-tools", "gui"]
 
 [dependencies]
 eframe = "0.37"
