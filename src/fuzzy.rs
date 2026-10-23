@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 const IGNORED_DIRS: &[&str] = &[
     ".git", "target", "node_modules", ".idea", ".vscode", "build", "dist",
     ".DS_Store", "DerivedData", "vendor",
+    "Music", "Pictures", "Movies", "Library", ".Trash", ".Spotlight-V100",
 ];
 
 #[derive(Debug, Clone)]

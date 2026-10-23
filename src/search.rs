@@ -144,7 +144,7 @@ fn collect_text_files(dir: &Path, list: &mut Vec<PathBuf>, depth: usize) {
         if name.starts_with('.') && name != ".env" {
             continue;
         }
-        if ["target", "node_modules", "build", "dist", ".git"].contains(&name.as_str()) {
+        if ["target", "node_modules", "build", "dist", ".git", "Music", "Pictures", "Movies", "Library", ".Trash"].contains(&name.as_str()) {
             continue;
         }
         if let Ok(ft) = entry.file_type() {

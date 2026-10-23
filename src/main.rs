@@ -1002,10 +1002,10 @@ impl Editor {
                 self.tabs.push(Tab::untitled());
                 self.active = self.tabs.len() - 1;
             }
-            if ui.button("📁 Open File…").on_hover_text("Open File (⌘O)").clicked() {
+            if ui.button("📂 Open").on_hover_text("Open File (⌘O)").clicked() {
                 self.open_file_dialog();
             }
-            if ui.button("📂 Open Folder…").on_hover_text("Open Project Folder (⌘⇧O)").clicked() {
+            if ui.button("📁 Folder").on_hover_text("Open Project Folder (⌘⇧O)").clicked() {
                 self.open_folder_dialog();
             }
 
@@ -1023,7 +1023,7 @@ impl Editor {
                 self.find_open = !self.find_open;
                 self.find_focus = self.find_open;
             }
-            if ui.button("🌐 Project Search").on_hover_text("Search across all files (⌘⇧F)").clicked() {
+            if ui.button("🔎 Search").on_hover_text("Search across all files (⌘⇧F)").clicked() {
                 self.project_search.open = !self.project_search.open;
             }
 
@@ -1908,7 +1908,10 @@ impl Editor {
     }
 }
 
-const HIDDEN: &[&str] = &[".git", ".DS_Store", "node_modules", "target", ".idea", ".vscode"];
+const HIDDEN: &[&str] = &[
+    ".git", ".DS_Store", "node_modules", "target", ".idea", ".vscode",
+    "Music", "Pictures", "Movies", "Library", ".Trash",
+];
 
 thread_local! {
     static CURSOR: std::cell::RefCell<(usize, usize, Option<usize>)> = const { std::cell::RefCell::new((1, 1, None)) };
