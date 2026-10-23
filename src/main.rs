@@ -328,6 +328,7 @@ struct Editor {
     git: GitRepoStatus,
     settings: Settings,
     settings_open: bool,
+    about_open: bool,
 
     tree_modal: Option<TreeModal>,
     modal_input: String,
@@ -362,6 +363,7 @@ impl Editor {
             git: GitRepoStatus::new(),
             settings: session.settings,
             settings_open: false,
+            about_open: false,
 
             tree_modal: None,
             modal_input: String::new(),
@@ -1740,8 +1742,8 @@ impl Editor {
         egui::Window::new("Settings (⌘,)")
             .id(egui::Id::unique("settings_modal"))
             .collapsible(false)
-            .resizable(false)
-            .fixed_size([380.0, 300.0])
+            .resizable(true)
+            .default_width(420.0)
             .show(ctx, |ui| {
                 ui.heading("Editor Preferences");
                 ui.separator();
@@ -1789,6 +1791,44 @@ impl Editor {
                     changed = true;
                 }
 
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // About Yegz & Links
+                ui.heading("About Yegz");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Yegz v0.1.0").strong());
+                    ui.label(RichText::new("— A powerful editor. Without the clutter.").color(ui.visuals().text_color().gamma_multiply(0.7)));
+                });
+
+                ui.add_space(6.0);
+                egui::Grid::new("about_links_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("🌐 Website:");
+                        ui.hyperlink_to("https://yegz.com", "https://yegz.com");
+                        ui.end_row();
+
+                        ui.label("📦 Source Code:");
+                        ui.hyperlink_to("github.com/zigl/yegz", "https://github.com/zigl/yegz");
+                        ui.end_row();
+
+                        ui.label("🚀 Releases:");
+                        ui.hyperlink_to("Downloads & Release Notes", "https://github.com/zigl/yegz/releases");
+                        ui.end_row();
+
+                        ui.label("🐛 Report Issue:");
+                        ui.hyperlink_to("github.com/zigl/yegz/issues", "https://github.com/zigl/yegz/issues");
+                        ui.end_row();
+
+                        ui.label("📜 License:");
+                        ui.hyperlink_to("MIT License", "https://github.com/zigl/yegz/blob/main/LICENSE");
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Done").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -1801,6 +1841,64 @@ impl Editor {
             apply_theme(ctx, &self.settings);
             self.save_session_state();
         }
+    }
+
+    fn about_dialog(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+
+        egui::Window::new("About Yegz")
+            .id(egui::Id::unique("about_modal"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(6.0);
+                    ui.heading("Yegz");
+                    ui.label(RichText::new("Version 0.1.0").small().color(ui.visuals().text_color().gamma_multiply(0.7)));
+                    ui.add_space(4.0);
+                    ui.label("A powerful editor. Without the clutter.");
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                egui::Grid::new("about_modal_links")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("🌐 Website:");
+                        ui.hyperlink_to("https://yegz.com", "https://yegz.com");
+                        ui.end_row();
+
+                        ui.label("📦 Source Code:");
+                        ui.hyperlink_to("github.com/zigl/yegz", "https://github.com/zigl/yegz");
+                        ui.end_row();
+
+                        ui.label("🚀 Releases:");
+                        ui.hyperlink_to("Downloads & Release Notes", "https://github.com/zigl/yegz/releases");
+                        ui.end_row();
+
+                        ui.label("🐛 Report Issue:");
+                        ui.hyperlink_to("github.com/zigl/yegz/issues", "https://github.com/zigl/yegz/issues");
+                        ui.end_row();
+
+                        ui.label("📜 License:");
+                        ui.hyperlink_to("MIT License", "https://github.com/zigl/yegz/blob/main/LICENSE");
+                        ui.end_row();
+                    });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                        self.about_open = false;
+                    }
+                });
+            });
     }
 
     fn tree_actions_modal(&mut self, ctx: &egui::Context) {
@@ -2096,6 +2194,7 @@ impl eframe::App for Editor {
         self.fuzzy_palette(&ctx);
         self.project_search_modal(&ctx);
         self.settings_dialog(&ctx);
+        self.about_dialog(&ctx);
         self.tree_actions_modal(&ctx);
         self.confirm_dialog(&ctx);
     }
