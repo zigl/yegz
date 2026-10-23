@@ -2101,26 +2101,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "lite"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "egui_commonmark",
- "egui_extras",
- "hayro",
- "image",
- "regex",
- "resvg",
- "rfd",
- "serde",
- "serde_json",
- "syntect",
- "two-face",
- "usvg",
-]
-
-[[package]]
 name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5026,6 +5006,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56c1936c4cc7a1c9ab21a1ebb602eb942ba868cbd44a99cb7cdc5892335e1c85"
 dependencies = [
  "linked-hash-map",
+]
+
+[[package]]
+name = "yegz"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "egui_commonmark",
+ "egui_extras",
+ "hayro",
+ "image",
+ "regex",
+ "resvg",
+ "rfd",
+ "serde",
+ "serde_json",
+ "syntect",
+ "two-face",
+ "usvg",
 ]
 
 [[package]]

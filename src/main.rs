@@ -1,4 +1,4 @@
-//! Lite — an Atom-inspired lightweight code and file editor in Rust.
+//! Yegz — an Atom-inspired lightweight code and file editor in Rust.
 
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -32,14 +32,14 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Lite")
+            .with_title("Yegz")
             .with_inner_size(if initial_size[0] > 100.0 { initial_size } else { [1100.0, 720.0] })
             .with_min_inner_size([400.0, 300.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Lite",
+        "Yegz",
         options,
         Box::new(move |cc| {
             apply_theme(&cc.egui_ctx, &session.settings);
@@ -945,6 +945,58 @@ impl Editor {
         }
     }
 
+    fn main_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+
+            if ui.button("📄 New").on_hover_text("New Tab (⌘N)").clicked() {
+                self.tabs.push(Tab::untitled());
+                self.active = self.tabs.len() - 1;
+            }
+            if ui.button("📁 Open File…").on_hover_text("Open File (⌘O)").clicked() {
+                self.open_file_dialog();
+            }
+            if ui.button("📂 Open Folder…").on_hover_text("Open Project Folder (⌘⇧O)").clicked() {
+                self.open_folder_dialog();
+            }
+
+            let can_save = self.tabs.get(self.active).map(|t| t.dirty() || t.path.is_none()).unwrap_or(false);
+            if ui.add_enabled(can_save, egui::Button::new("💾 Save")).on_hover_text("Save File (⌘S)").clicked() {
+                self.save(self.active, false);
+            }
+
+            ui.separator();
+
+            if ui.button("⚡ Quick Open").on_hover_text("Fuzzy File Finder (⌘P)").clicked() {
+                self.fuzzy.open_palette();
+            }
+            if ui.button("🔍 Find").on_hover_text("Find & Replace in File (⌘F)").clicked() {
+                self.find_open = !self.find_open;
+                self.find_focus = self.find_open;
+            }
+            if ui.button("🌐 Project Search").on_hover_text("Search across all files (⌘⇧F)").clicked() {
+                self.project_search.open = !self.project_search.open;
+            }
+
+            ui.separator();
+
+            let sidebar_label = if self.show_sidebar { "◧ Sidebar" } else { "◨ Sidebar" };
+            if ui.button(sidebar_label).on_hover_text("Toggle File Tree Sidebar (⌘B)").clicked() {
+                self.show_sidebar = !self.show_sidebar;
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("⚙ Settings").on_hover_text("Preferences & Themes (⌘,)").clicked() {
+                    self.settings_open = !self.settings_open;
+                }
+                if let Some(ref branch) = self.git.branch {
+                    ui.label(RichText::new(format!(" {branch}")).small().color(Color32::from_rgb(97, 175, 239)));
+                    ui.separator();
+                }
+            });
+        });
+    }
+
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
         egui::ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
@@ -1725,7 +1777,7 @@ impl eframe::App for Editor {
 
         // Window title
         let tab = &self.tabs[self.active];
-        let title = format!("{}{} — Lite", if tab.dirty() { "● " } else { "" }, tab.title());
+        let title = format!("{}{} — Yegz", if tab.dirty() { "● " } else { "" }, tab.title());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
 
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -1741,6 +1793,7 @@ impl eframe::App for Editor {
                 });
         }
 
+        egui::Panel::top("main_toolbar").show(ui, |ui| self.main_toolbar(ui));
         egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
 
         if self.find_open {

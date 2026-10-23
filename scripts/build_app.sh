@@ -7,13 +7,13 @@ cd "$DIR"
 echo "Building release binary..."
 cargo build --release
 
-APP="target/release/Lite.app"
+APP="target/release/Yegz.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 
-cp target/release/lite "$APP/Contents/MacOS/lite"
-chmod +x "$APP/Contents/MacOS/lite"
+cp target/release/yegz "$APP/Contents/MacOS/yegz"
+chmod +x "$APP/Contents/MacOS/yegz"
 cp scripts/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'EOF'
@@ -22,11 +22,11 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Lite</string>
+    <string>Yegz</string>
     <key>CFBundleDisplayName</key>
-    <string>Lite</string>
+    <string>Yegz</string>
     <key>CFBundleIdentifier</key>
-    <string>com.lite.editor</string>
+    <string>com.yegz.editor</string>
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
     <key>CFBundleShortVersionString</key>
@@ -36,7 +36,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleExecutable</key>
-    <string>lite</string>
+    <string>yegz</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>NSHighResolutionCapable</key>

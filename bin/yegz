@@ -1,0 +1,33 @@
+#!/bin/sh
+# 'yegz' terminal command — open files or directories in Yegz (similar to 'atom .')
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Prefer release binary if built, otherwise debug
+if [ -f "$REPO_DIR/target/release/yegz" ]; then
+    EXEC="$REPO_DIR/target/release/yegz"
+elif [ -f "$REPO_DIR/target/debug/yegz" ]; then
+    EXEC="$REPO_DIR/target/debug/yegz"
+elif [ -f "$REPO_DIR/target/release/lite" ]; then
+    EXEC="$REPO_DIR/target/release/lite"
+elif [ -f "$REPO_DIR/target/debug/lite" ]; then
+    EXEC="$REPO_DIR/target/debug/lite"
+else
+    cargo build --manifest-path "$REPO_DIR/Cargo.toml" --release
+    EXEC="$REPO_DIR/target/release/yegz"
+fi
+
+if [ $# -eq 0 ]; then
+    exec "$EXEC" "$(pwd)"
+elif [ "$1" = "." ]; then
+    exec "$EXEC" "$(pwd)"
+else
+    TARGET="$1"
+    if [ -e "$TARGET" ]; then
+        ABS_PATH="$(cd "$(dirname "$TARGET")" && pwd)/$(basename "$TARGET")"
+        exec "$EXEC" "$ABS_PATH"
+    else
+        exec "$EXEC" "$TARGET"
+    fi
+fi

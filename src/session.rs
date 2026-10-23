@@ -78,7 +78,7 @@ pub struct SessionState {
 
 fn config_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
-        let p = PathBuf::from(home).join("Library/Application Support/lite");
+        let p = PathBuf::from(home).join("Library/Application Support/yegz");
         return Some(p);
     }
     None
