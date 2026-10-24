@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+mod commands;
 mod editor_ops;
 mod fuzzy;
 mod git;
@@ -16,6 +17,7 @@ mod session;
 mod syntax;
 mod viewers;
 
+use commands::CommandPalette;
 use fuzzy::FuzzyFinder;
 use git::{FileGitStatus, GitRepoStatus};
 use search::ProjectSearch;
@@ -337,6 +339,15 @@ struct Editor {
     settings_open: bool,
     about_open: bool,
 
+    // New Features
+    command_palette: CommandPalette,
+    goto_line_open: bool,
+    goto_line_input: String,
+    recent_files: Vec<PathBuf>,
+    recent_projects: Vec<PathBuf>,
+    split_view: bool,
+    split_active: usize,
+
     tree_modal: Option<TreeModal>,
     modal_input: String,
 }
@@ -371,6 +382,14 @@ impl Editor {
             settings: session.settings,
             settings_open: false,
             about_open: false,
+
+            command_palette: CommandPalette::new(),
+            goto_line_open: false,
+            goto_line_input: String::new(),
+            recent_files: session.recent_files.clone(),
+            recent_projects: session.recent_projects.clone(),
+            split_view: false,
+            split_active: 0,
 
             tree_modal: None,
             modal_input: String::new(),
@@ -425,6 +444,12 @@ impl Editor {
     }
 
     fn set_root(&mut self, root: Option<&Path>) {
+        if let Some(r) = root {
+            let canon = r.canonicalize().unwrap_or_else(|_| r.to_path_buf());
+            self.recent_projects.retain(|p| p != &canon);
+            self.recent_projects.insert(0, canon);
+            self.recent_projects.truncate(10);
+        }
         self.root = root.map(|p| p.to_path_buf());
         self.dir_cache.clear();
         self.fuzzy.set_root(root);
@@ -446,6 +471,8 @@ impl Editor {
             sidebar_width: self.sidebar_width,
             window_size,
             settings: self.settings.clone(),
+            recent_files: self.recent_files.clone(),
+            recent_projects: self.recent_projects.clone(),
         };
         session::save_session(&state);
     }
@@ -454,6 +481,10 @@ impl Editor {
 
     fn open_file(&mut self, path: &Path) {
         let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.recent_files.retain(|p| p != &canon);
+        self.recent_files.insert(0, canon.clone());
+        self.recent_files.truncate(20);
+
         if let Some(i) = self.tabs.iter().position(|t| t.path.as_deref() == Some(&canon)) {
             self.active = i;
             return;
@@ -691,6 +722,25 @@ impl Editor {
         let alt = Modifiers::ALT;
         let hit = |m, k| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
 
+        // Command Palette (⌘⇧P)
+        if hit(cmd_shift, Key::P) {
+            self.command_palette.open_palette();
+        }
+
+        // Go to Line (Ctrl+G)
+        if hit(Modifiers::CTRL, Key::G) {
+            self.goto_line_open = true;
+            self.goto_line_input.clear();
+        }
+
+        // Toggle Split View (⌘⌥\)
+        if hit(Modifiers::COMMAND | Modifiers::ALT, Key::Backslash) {
+            self.split_view = !self.split_view;
+            if self.split_view && self.tabs.len() >= 2 && self.split_active == self.active {
+                self.split_active = (self.active + 1) % self.tabs.len();
+            }
+        }
+
         // Fuzzy Finder (⌘P)
         if hit(cmd, Key::P) {
             self.fuzzy.open_palette();
@@ -880,6 +930,64 @@ impl Editor {
                 state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_pos))));
                 state.clone().store(ctx, id);
             }
+
+            // Auto-close pairs & wrap selection
+            if is_editor_focused && self.settings.auto_close_pairs {
+                let mut char_to_insert = None;
+                ctx.input_mut(|i| {
+                    if let Some(pos) = i.events.iter().position(|e| match e {
+                        egui::Event::Text(s) => matches!(s.as_str(), "(" | "[" | "{" | "\"" | "'" | "`" | ")" | "]" | "}"),
+                        _ => false,
+                    }) {
+                        if let egui::Event::Text(s) = i.events.remove(pos) {
+                            if let Some(ch) = s.chars().next() {
+                                char_to_insert = Some(ch);
+                            }
+                        }
+                    }
+                });
+
+                if let Some(ch) = char_to_insert {
+                    let tab = &mut self.tabs[self.active];
+                    if !tab.read_only {
+                        if matches!(ch, ')' | ']' | '}') && editor_ops::should_skip_closing_char(&tab.text, cursor_start, ch) && cursor_start == cursor_end {
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_start + 1))));
+                            state.clone().store(ctx, id);
+                        } else if let Some((new_text, s, e)) = editor_ops::handle_auto_close_pair(&tab.text, cursor_start, cursor_end, ch) {
+                            tab.text = new_text;
+                            tab.recalculate_line_numbers();
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
+                            state.clone().store(ctx, id);
+                        } else {
+                            let chars: Vec<char> = tab.text.chars().collect();
+                            let min_c = cursor_start.min(cursor_end);
+                            let max_c = cursor_start.max(cursor_end);
+                            let mut new_text = String::with_capacity(tab.text.len() + 1);
+                            new_text.extend(chars[..min_c].iter());
+                            new_text.push(ch);
+                            new_text.extend(chars[max_c..].iter());
+                            tab.text = new_text;
+                            tab.recalculate_line_numbers();
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(min_c + 1))));
+                            state.clone().store(ctx, id);
+                        }
+                    }
+                }
+
+                // Auto-backspace pair deletion
+                if cursor_start == cursor_end && ctx.input(|i| i.key_pressed(Key::Backspace)) {
+                    let tab = &mut self.tabs[self.active];
+                    if !tab.read_only {
+                        if let Some((new_text, new_pos)) = editor_ops::handle_auto_backspace_pair(&tab.text, cursor_start) {
+                            ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Backspace));
+                            tab.text = new_text;
+                            tab.recalculate_line_numbers();
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_pos))));
+                            state.clone().store(ctx, id);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1023,10 +1131,60 @@ impl Editor {
         let Some(root) = self.root.clone() else {
             ui.vertical_centered(|ui| {
                 ui.add_space(20.0);
-                if ui.button("Open Folder…").clicked() {
+                if ui.button("📁 Open Folder…").clicked() {
                     self.open_folder_dialog();
                 }
+                ui.add_space(6.0);
+                if ui.button("📄 Open File…").clicked() {
+                    self.open_file_dialog();
+                }
             });
+
+            if !self.recent_projects.is_empty() {
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("RECENT PROJECTS")
+                        .size(11.0)
+                        .strong()
+                        .color(Color32::from_rgb(130, 140, 155)),
+                );
+                ui.add_space(4.0);
+                let mut open_proj = None;
+                for p in self.recent_projects.iter().take(6) {
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string());
+                    if ui.button(format!("📁 {name}")).on_hover_text(p.display().to_string()).clicked() {
+                        open_proj = Some(p.clone());
+                    }
+                }
+                if let Some(p) = open_proj {
+                    self.set_root(Some(&p));
+                }
+            }
+
+            if !self.recent_files.is_empty() {
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("RECENT FILES")
+                        .size(11.0)
+                        .strong()
+                        .color(Color32::from_rgb(130, 140, 155)),
+                );
+                ui.add_space(4.0);
+                let mut open_file = None;
+                for p in self.recent_files.iter().take(8) {
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string());
+                    if ui.button(format!("📄 {name}")).on_hover_text(p.display().to_string()).clicked() {
+                        open_file = Some(p.clone());
+                    }
+                }
+                if let Some(p) = open_file {
+                    self.open_file(&p);
+                }
+            }
             return;
         };
 
@@ -1053,6 +1211,23 @@ impl Editor {
         let mut to_open = None;
         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
             self.tree(ui, &root, &mut to_open, &active_path);
+
+            if !self.recent_files.is_empty() {
+                ui.add_space(12.0);
+                ui.separator();
+                ui.collapsing("Recent Files", |ui| {
+                    let mut open_f = None;
+                    for p in self.recent_files.iter().take(6) {
+                        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string());
+                        if ui.button(format!("📄 {name}")).on_hover_text(p.display().to_string()).clicked() {
+                            open_f = Some(p.clone());
+                        }
+                    }
+                    if let Some(p) = open_f {
+                        to_open = Some(p);
+                    }
+                });
+            }
         });
 
         if let Some(p) = to_open {
@@ -1063,6 +1238,14 @@ impl Editor {
     fn main_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
+
+            if ui.button("⚡ Commands").on_hover_text("Command Palette (⌘⇧P)").clicked() {
+                self.command_palette.open_palette();
+            }
+
+            ui.add_space(2.0);
+            ui.separator();
+            ui.add_space(2.0);
 
             if ui.button("📂 Open").on_hover_text("Open File (⌘O)").clicked() {
                 self.open_file_dialog();
@@ -1094,6 +1277,14 @@ impl Editor {
             ui.add_space(2.0);
             ui.separator();
             ui.add_space(2.0);
+
+            let split_label = if self.split_view { "◫ Split [ON]" } else { "◫ Split" };
+            if ui.selectable_label(self.split_view, split_label).on_hover_text("Toggle Side-by-Side Split View (⌘⌥\\)").clicked() {
+                self.split_view = !self.split_view;
+                if self.split_view && self.tabs.len() >= 2 && self.split_active == self.active {
+                    self.split_active = (self.active + 1) % self.tabs.len();
+                }
+            }
 
             let sidebar_label = if self.show_sidebar { "◧ Sidebar" } else { "◨ Sidebar" };
             if ui.button(sidebar_label).on_hover_text("Toggle File Tree Sidebar (⌘B)").clicked() {
@@ -1272,36 +1463,107 @@ impl Editor {
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {
-        let tab = &mut self.tabs[self.active];
+        if self.split_view && self.tabs.len() >= 2 {
+            if self.split_active >= self.tabs.len() || self.split_active == self.active {
+                self.split_active = (self.active + 1) % self.tabs.len();
+            }
+            let half = (ui.available_width() - 8.0) / 2.0;
+            let mut close_split = false;
+            let split_idx = self.split_active;
 
-        // Alert banner if external modification occurred
-        if tab.disk_changed {
-            egui::Panel::top("disk_alert").show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(Color32::from_rgb(229, 192, 123), "⚠ File modified on disk by another program.");
-                    if ui.button("Reload from disk").clicked() {
-                        if let Some(p) = &tab.path {
-                            if let Ok(bytes) = fs::read(p) {
-                                if let Ok(s) = String::from_utf8(bytes) {
-                                    tab.text = s.clone();
-                                    tab.saved = s;
-                                    tab.disk_changed = false;
-                                    tab.last_modified = fs::metadata(p).and_then(|m| m.modified()).ok();
-                                    tab.recalculate_line_numbers();
+            egui::Panel::right("split_editor_right_panel")
+                .resizable(true)
+                .default_size(half)
+                .size_range(180.0..=(ui.available_width() - 180.0).max(180.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let tab_title = self.tabs.get(split_idx).map(|t| t.title()).unwrap_or_else(|| "Tab".into());
+                        let is_dirty = self.tabs.get(split_idx).map(|t| t.dirty()).unwrap_or(false);
+                        ui.label(RichText::new(format!("◫ {}{tab_title}", if is_dirty { "● " } else { "" })).strong());
+
+                        ui.menu_button("▾", |ui| {
+                            let mut pick_idx = None;
+                            for (i, t) in self.tabs.iter().enumerate() {
+                                if i != self.active {
+                                    if ui.selectable_label(i == split_idx, t.title()).clicked() {
+                                        pick_idx = Some(i);
+                                        ui.close();
+                                    }
                                 }
                             }
-                        }
-                    }
-                    if ui.button("Ignore / Keep local changes").clicked() {
-                        tab.disk_changed = false;
-                        if let Some(p) = &tab.path {
-                            tab.last_modified = fs::metadata(p).and_then(|m| m.modified()).ok();
-                        }
-                    }
+                            if let Some(i) = pick_idx {
+                                self.split_active = i;
+                            }
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").on_hover_text("Close split pane").clicked() {
+                                close_split = true;
+                            }
+                        });
+                    });
+                    ui.separator();
+                    self.render_tab_pane(ui, split_idx);
                 });
-            });
+
+            if close_split {
+                self.split_view = false;
+            }
+
+            self.render_tab_pane(ui, self.active);
+        } else {
+            self.render_tab_pane(ui, self.active);
+        }
+    }
+
+    fn render_tab_pane(&mut self, ui: &mut egui::Ui, tab_idx: usize) {
+        if tab_idx >= self.tabs.len() {
+            return;
         }
 
+        let mut reload = false;
+        let mut ignore = false;
+        {
+            let tab = &self.tabs[tab_idx];
+            if tab.disk_changed {
+                egui::Panel::top(egui::Id::unique(("disk_alert", tab_idx))).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(Color32::from_rgb(229, 192, 123), "⚠ File modified on disk by another program.");
+                        if ui.button("Reload from disk").clicked() {
+                            reload = true;
+                        }
+                        if ui.button("Ignore / Keep local changes").clicked() {
+                            ignore = true;
+                        }
+                    });
+                });
+            }
+        }
+
+        if reload {
+            let tab = &mut self.tabs[tab_idx];
+            if let Some(p) = &tab.path {
+                if let Ok(bytes) = fs::read(p) {
+                    if let Ok(s) = String::from_utf8(bytes) {
+                        tab.text = s.clone();
+                        tab.saved = s;
+                        tab.disk_changed = false;
+                        tab.last_modified = fs::metadata(p).and_then(|m| m.modified()).ok();
+                        tab.recalculate_line_numbers();
+                    }
+                }
+            }
+        }
+        if ignore {
+            let tab = &mut self.tabs[tab_idx];
+            tab.disk_changed = false;
+            if let Some(p) = &tab.path {
+                tab.last_modified = fs::metadata(p).and_then(|m| m.modified()).ok();
+            }
+        }
+
+        let tab = &mut self.tabs[tab_idx];
         match &mut tab.view {
             View::Image(v) => return v.ui(ui),
             View::Pdf(v) => return v.ui(ui),
@@ -1309,11 +1571,11 @@ impl Editor {
         }
 
         if !tab.is_markdown() {
-            return self.text_editor(ui);
+            return self.render_text_editor(ui, tab_idx);
         }
 
         // Markdown: Source / Split / Preview
-        egui::Panel::top("md_toolbar").show(ui, |ui| {
+        egui::Panel::top(egui::Id::unique(("md_toolbar", tab_idx))).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (mode, label) in [(MdMode::Source, "Source"), (MdMode::Split, "Split"), (MdMode::Preview, "Preview")] {
                     if ui.selectable_label(tab.md_mode == mode, label).clicked() {
@@ -1325,16 +1587,16 @@ impl Editor {
         });
 
         match tab.md_mode {
-            MdMode::Source => self.text_editor(ui),
+            MdMode::Source => self.render_text_editor(ui, tab_idx),
             MdMode::Preview => Self::md_preview(tab, ui),
             MdMode::Split => {
                 let half = ui.available_width() / 2.0;
-                egui::Panel::right("md_preview")
+                egui::Panel::right(egui::Id::unique(("md_preview", tab_idx)))
                     .resizable(true)
                     .default_size(half)
                     .size_range(150.0..=ui.available_width() - 150.0)
                     .show(ui, |ui| Self::md_preview(tab, ui));
-                self.text_editor(ui);
+                self.render_text_editor(ui, tab_idx);
             }
         }
     }
@@ -1357,11 +1619,15 @@ impl Editor {
         });
     }
 
-    fn text_editor(&mut self, ui: &mut egui::Ui) {
-        let id = self.editor_id();
-        let goto = self.goto_offset.take();
+    fn render_text_editor(&mut self, ui: &mut egui::Ui, tab_idx: usize) {
+        if tab_idx >= self.tabs.len() {
+            return;
+        }
+        let is_active = tab_idx == self.active;
+        let id = egui::Id::unique(("editor", tab_idx, self.tabs[tab_idx].path.clone()));
+        let goto = if is_active { self.goto_offset.take() } else { None };
         let needle_len = self.find_query.chars().count();
-        let tab = &mut self.tabs[self.active];
+        let tab = &mut self.tabs[tab_idx];
         let lang = tab.syntax.clone();
         let theme = CodeTheme::from_style(ui.style());
         let read_only = tab.read_only;
@@ -1428,6 +1694,12 @@ impl Editor {
 
         let mut out = output.inner;
 
+        if out.response.clicked() || out.response.gained_focus() {
+            if !is_active {
+                self.active = tab_idx;
+            }
+        }
+
         if let Some(byte) = goto {
             let start = tab.text[..byte.min(tab.text.len())].chars().count();
             let range = egui::text::CCursorRange::two(
@@ -1441,13 +1713,15 @@ impl Editor {
             ui.ctx().memory_mut(|m| m.request_focus(id));
         }
 
-        if let Some(r) = out.cursor_range {
-            let idx: usize = r.primary.index.into();
-            let before: String = tab.text.chars().take(idx).collect();
-            let line = before.matches('\n').count() + 1;
-            let col = before.rsplit('\n').next().map(|s| s.chars().count()).unwrap_or(0) + 1;
-            let bracket = editor_ops::find_matching_bracket(&tab.text, idx);
-            CURSOR.with(|c| *c.borrow_mut() = (line, col, bracket));
+        if is_active {
+            if let Some(r) = out.cursor_range {
+                let idx: usize = r.primary.index.into();
+                let before: String = tab.text.chars().take(idx).collect();
+                let line = before.matches('\n').count() + 1;
+                let col = before.rsplit('\n').next().map(|s| s.chars().count()).unwrap_or(0) + 1;
+                let bracket = editor_ops::find_matching_bracket(&tab.text, idx);
+                CURSOR.with(|c| *c.borrow_mut() = (line, col, bracket));
+            }
         }
     }
 
@@ -1596,6 +1870,329 @@ impl Editor {
     }
 
     // ----- Modals & Palettes -----------------------------------------------
+
+    fn execute_command(&mut self, ctx: &egui::Context, cmd_id: &str) {
+        match cmd_id {
+            "file.new" => {
+                self.tabs.push(Tab::untitled());
+                self.active = self.tabs.len() - 1;
+            }
+            "file.open" => self.open_file_dialog(),
+            "file.open_folder" => self.open_folder_dialog(),
+            "file.save" => {
+                self.save(self.active, false);
+            }
+            "file.save_as" => {
+                self.save(self.active, true);
+            }
+            "file.close_tab" => self.request_close(self.active),
+            "file.close_other_tabs" => self.close_other_tabs(self.active),
+            "file.reveal_finder" => {
+                if let Some(p) = self.tabs.get(self.active).and_then(|t| t.path.as_deref()) {
+                    let _ = std::process::Command::new("open").arg("-R").arg(p).spawn();
+                }
+            }
+            "file.copy_path" => {
+                if let Some(p) = self.tabs.get(self.active).and_then(|t| t.path.as_deref()) {
+                    ctx.copy_text(p.display().to_string());
+                    self.status = format!("Copied path: {}", p.display());
+                }
+            }
+            "find.quick_open" => self.fuzzy.open_palette(),
+            "find.in_file" => {
+                self.find_open = true;
+                self.find_focus = true;
+            }
+            "find.in_project" => self.project_search.open = true,
+            "navigate.goto_line" => {
+                self.goto_line_open = true;
+                self.goto_line_input.clear();
+            }
+            "edit.toggle_comment" => {
+                let id = self.editor_id();
+                let state = egui::TextEdit::load_state(ctx, id);
+                let (cursor_start, cursor_end) = state
+                    .and_then(|s| s.cursor.char_range())
+                    .map(|r| (r.primary.index.0, r.secondary.index.0))
+                    .unwrap_or((0, 0));
+                let tab = &mut self.tabs[self.active];
+                let (new_text, _, _) = editor_ops::toggle_comment(&tab.text, cursor_start, cursor_end, &tab.syntax);
+                tab.text = new_text;
+                tab.recalculate_line_numbers();
+            }
+            "edit.duplicate_line" => {
+                let id = self.editor_id();
+                let state = egui::TextEdit::load_state(ctx, id);
+                let cursor_start = state
+                    .and_then(|s| s.cursor.char_range())
+                    .map(|r| r.primary.index.0)
+                    .unwrap_or(0);
+                let tab = &mut self.tabs[self.active];
+                let (new_text, new_cursor) = editor_ops::duplicate_line(&tab.text, cursor_start);
+                tab.text = new_text;
+                tab.recalculate_line_numbers();
+                if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
+                    state.store(ctx, id);
+                }
+            }
+            "edit.move_line_up" => {
+                let id = self.editor_id();
+                let state = egui::TextEdit::load_state(ctx, id);
+                let cursor_start = state
+                    .and_then(|s| s.cursor.char_range())
+                    .map(|r| r.primary.index.0)
+                    .unwrap_or(0);
+                let tab = &mut self.tabs[self.active];
+                let (new_text, new_cursor) = editor_ops::move_line(&tab.text, cursor_start, true);
+                tab.text = new_text;
+                tab.recalculate_line_numbers();
+                if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
+                    state.store(ctx, id);
+                }
+            }
+            "edit.move_line_down" => {
+                let id = self.editor_id();
+                let state = egui::TextEdit::load_state(ctx, id);
+                let cursor_start = state
+                    .and_then(|s| s.cursor.char_range())
+                    .map(|r| r.primary.index.0)
+                    .unwrap_or(0);
+                let tab = &mut self.tabs[self.active];
+                let (new_text, new_cursor) = editor_ops::move_line(&tab.text, cursor_start, false);
+                tab.text = new_text;
+                tab.recalculate_line_numbers();
+                if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
+                    state.store(ctx, id);
+                }
+            }
+            "edit.indent" => {
+                let id = self.editor_id();
+                let state = egui::TextEdit::load_state(ctx, id);
+                let (cursor_start, cursor_end) = state
+                    .and_then(|s| s.cursor.char_range())
+                    .map(|r| (r.primary.index.0, r.secondary.index.0))
+                    .unwrap_or((0, 0));
+                let tab = &mut self.tabs[self.active];
+                if !tab.read_only {
+                    let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, false, self.settings.tab_size);
+                    tab.text = new_text;
+                    tab.recalculate_line_numbers();
+                    if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
+                        state.store(ctx, id);
+                    }
+                }
+            }
+            "edit.outdent" => {
+                let id = self.editor_id();
+                let state = egui::TextEdit::load_state(ctx, id);
+                let (cursor_start, cursor_end) = state
+                    .and_then(|s| s.cursor.char_range())
+                    .map(|r| (r.primary.index.0, r.secondary.index.0))
+                    .unwrap_or((0, 0));
+                let tab = &mut self.tabs[self.active];
+                if !tab.read_only {
+                    let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, true, self.settings.tab_size);
+                    tab.text = new_text;
+                    tab.recalculate_line_numbers();
+                    if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
+                        state.store(ctx, id);
+                    }
+                }
+            }
+            "view.toggle_sidebar" => self.show_sidebar = !self.show_sidebar,
+            "view.toggle_split" => {
+                self.split_view = !self.split_view;
+                if self.split_view && self.tabs.len() >= 2 && self.split_active == self.active {
+                    self.split_active = (self.active + 1) % self.tabs.len();
+                }
+            }
+            "view.toggle_word_wrap" => {
+                self.settings.word_wrap = !self.settings.word_wrap;
+                self.save_session_state();
+            }
+            "view.toggle_line_numbers" => {
+                self.settings.show_line_numbers = !self.settings.show_line_numbers;
+                self.save_session_state();
+            }
+            "theme.onedark" => {
+                self.settings.theme = ThemeName::OneDark;
+                apply_theme(ctx, &self.settings);
+                self.save_session_state();
+            }
+            "theme.onelight" => {
+                self.settings.theme = ThemeName::OneLight;
+                apply_theme(ctx, &self.settings);
+                self.save_session_state();
+            }
+            "theme.githubdark" => {
+                self.settings.theme = ThemeName::GitHubDark;
+                apply_theme(ctx, &self.settings);
+                self.save_session_state();
+            }
+            "theme.monokai" => {
+                self.settings.theme = ThemeName::Monokai;
+                apply_theme(ctx, &self.settings);
+                self.save_session_state();
+            }
+            "syntax.autodetect" => {
+                let tab = &mut self.tabs[self.active];
+                tab.syntax = syntax::detect(tab.path.as_deref(), &tab.text);
+            }
+            "preferences.open" => self.settings_open = true,
+            "help.about" => self.about_open = true,
+            _ => {}
+        }
+    }
+
+    fn command_palette_modal(&mut self, ctx: &egui::Context) {
+        if !self.command_palette.open {
+            return;
+        }
+
+        let mut close = false;
+        let mut execute_id = None;
+
+        egui::Window::new("Command Palette (⌘⇧P)")
+            .id(egui::Id::unique("command_palette_window"))
+            .collapsible(false)
+            .resizable(false)
+            .fixed_pos(ctx.input(|i| {
+                let size = i.viewport().inner_rect.map(|r| r.size()).unwrap_or(egui::Vec2::new(1000.0, 700.0));
+                egui::pos2((size.x - 580.0) / 2.0, 70.0)
+            }))
+            .fixed_size([580.0, 420.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("⚡");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.command_palette.query)
+                            .hint_text("Type a command or action (e.g. split, wrap, theme, git)…")
+                            .desired_width(520.0),
+                    );
+                    r.request_focus();
+
+                    if r.changed() {
+                        self.command_palette.update_search();
+                    }
+
+                    if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
+                        if self.command_palette.selected + 1 < self.command_palette.results.len() {
+                            self.command_palette.selected += 1;
+                        }
+                    }
+                    if ui.input(|i| i.key_pressed(Key::ArrowUp)) && self.command_palette.selected > 0 {
+                        self.command_palette.selected -= 1;
+                    }
+                    if ui.input(|i| i.key_pressed(Key::Enter)) {
+                        if let Some(m) = self.command_palette.results.get(self.command_palette.selected) {
+                            execute_id = Some(m.command.id);
+                        }
+                    }
+                    if ui.input(|i| i.key_pressed(Key::Escape)) {
+                        close = true;
+                    }
+                });
+
+                ui.separator();
+
+                egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
+                    if self.command_palette.results.is_empty() {
+                        ui.add_space(20.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new("No matching commands").color(Color32::GRAY));
+                        });
+                    } else {
+                        for (i, m) in self.command_palette.results.iter().enumerate() {
+                            let selected = i == self.command_palette.selected;
+                            let cmd = m.command;
+
+                            let response = ui.horizontal(|ui| {
+                                let mut text = RichText::new(format!("{}  {}: {}", cmd.icon, cmd.category, cmd.title));
+                                if selected {
+                                    text = text.strong().color(Color32::from_rgb(97, 175, 239));
+                                }
+                                let label_res = ui.selectable_label(selected, text);
+                                if let Some(sc) = cmd.shortcut {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(RichText::new(sc).monospace().small().color(Color32::from_rgb(130, 140, 155)));
+                                    });
+                                }
+                                label_res
+                            }).inner;
+
+                            if response.clicked() {
+                                execute_id = Some(cmd.id);
+                            }
+                        }
+                    }
+                });
+            });
+
+        if let Some(id) = execute_id {
+            self.command_palette.close();
+            self.execute_command(ctx, id);
+        } else if close {
+            self.command_palette.close();
+        }
+    }
+
+    fn goto_line_modal(&mut self, ctx: &egui::Context) {
+        if !self.goto_line_open {
+            return;
+        }
+
+        let mut close = false;
+        let mut jump = false;
+
+        egui::Window::new("Go to Line (Ctrl+G)")
+            .id(egui::Id::unique("goto_line_window"))
+            .collapsible(false)
+            .resizable(false)
+            .fixed_pos(ctx.input(|i| {
+                let size = i.viewport().inner_rect.map(|r| r.size()).unwrap_or(egui::Vec2::new(1000.0, 700.0));
+                egui::pos2((size.x - 360.0) / 2.0, 90.0)
+            }))
+            .fixed_size([360.0, 110.0])
+            .show(ctx, |ui| {
+                ui.label(RichText::new("Enter line or line:col (e.g. 42 or 42:10):").small());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("📍");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.goto_line_input)
+                            .hint_text("line[:col]")
+                            .desired_width(260.0),
+                    );
+                    r.request_focus();
+
+                    if ui.button("Go").clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                        jump = true;
+                    }
+                    if ui.input(|i| i.key_pressed(Key::Escape)) {
+                        close = true;
+                    }
+                });
+            });
+
+        if jump {
+            let input = self.goto_line_input.trim();
+            let parts: Vec<&str> = input.split(':').collect();
+            let target_line = parts.first().and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(1);
+            let target_col = parts.get(1).and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(1);
+
+            let tab = &self.tabs[self.active];
+            let offset = editor_ops::line_col_to_byte_offset(&tab.text, target_line, target_col);
+            self.goto_offset = Some(offset);
+            self.goto_line_open = false;
+        } else if close {
+            self.goto_line_open = false;
+        }
+    }
 
     fn fuzzy_palette(&mut self, ctx: &egui::Context) {
         if !self.fuzzy.open {
@@ -1797,6 +2394,21 @@ impl Editor {
                 if ui.checkbox(&mut self.settings.show_line_numbers, "Show line numbers").changed() {
                     changed = true;
                 }
+
+                // Smart Auto-closing Pairs
+                if ui.checkbox(&mut self.settings.auto_close_pairs, "Auto-close quotes & brackets () [] {} \"\" '' ``").changed() {
+                    changed = true;
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("History: {} files, {} projects", self.recent_files.len(), self.recent_projects.len())).small());
+                    if ui.button("Clear History").clicked() {
+                        self.recent_files.clear();
+                        self.recent_projects.clear();
+                        changed = true;
+                    }
+                });
 
                 ui.add_space(10.0);
                 ui.separator();
@@ -2130,7 +2742,7 @@ impl eframe::App for Editor {
 
         self.check_disk_modifications();
 
-        if self.pending.is_none() && !self.fuzzy.open && !self.project_search.open && self.tree_modal.is_none() {
+        if self.pending.is_none() && !self.fuzzy.open && !self.project_search.open && !self.command_palette.open && !self.goto_line_open && self.tree_modal.is_none() {
             self.shortcuts(&ctx);
         }
 
@@ -2199,6 +2811,8 @@ impl eframe::App for Editor {
             .show(ui, |ui| self.central(ui));
 
         self.fuzzy_palette(&ctx);
+        self.command_palette_modal(&ctx);
+        self.goto_line_modal(&ctx);
         self.project_search_modal(&ctx);
         self.settings_dialog(&ctx);
         self.about_dialog(&ctx);

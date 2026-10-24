@@ -298,6 +298,125 @@ fn is_bracket(c: char) -> bool {
     matches!(c, '(' | ')' | '[' | ']' | '{' | '}')
 }
 
+/// Returns the matching closing character for an opening delimiter.
+pub fn matching_pair(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        '\'' => Some('\''),
+        '`' => Some('`'),
+        _ => None,
+    }
+}
+
+/// Automatically closes pairs when typing `open_char` or wraps selection.
+pub fn handle_auto_close_pair(
+    text: &str,
+    cursor_start: usize,
+    cursor_end: usize,
+    open_char: char,
+) -> Option<(String, usize, usize)> {
+    let close_char = matching_pair(open_char)?;
+    let chars: Vec<char> = text.chars().collect();
+    let s = cursor_start.min(cursor_end).min(chars.len());
+    let e = cursor_start.max(cursor_end).min(chars.len());
+
+    if s != e {
+        // Selection wrapping: e.g. "foo" -> "(foo)"
+        let mut new_text = String::with_capacity(text.len() + 2);
+        new_text.extend(chars[..s].iter());
+        new_text.push(open_char);
+        new_text.extend(chars[s..e].iter());
+        new_text.push(close_char);
+        new_text.extend(chars[e..].iter());
+        Some((new_text, s + 1, e + 1))
+    } else {
+        // Single cursor: don't auto-close single quote if preceded by alphanumeric (e.g. lifetime 'a or don't)
+        if open_char == '\'' && s > 0 && chars[s - 1].is_alphanumeric() {
+            return None;
+        }
+
+        let mut new_text = String::with_capacity(text.len() + 2);
+        new_text.extend(chars[..s].iter());
+        new_text.push(open_char);
+        new_text.push(close_char);
+        new_text.extend(chars[s..].iter());
+        Some((new_text, s + 1, s + 1))
+    }
+}
+
+/// Returns true if typing `close_char` should just step over the existing closing character.
+pub fn should_skip_closing_char(text: &str, cursor_char: usize, close_char: char) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    if cursor_char < chars.len() {
+        chars[cursor_char] == close_char
+    } else {
+        false
+    }
+}
+
+/// If cursor is between an empty pair (e.g. `(|)`), deletes both characters on Backspace.
+pub fn handle_auto_backspace_pair(text: &str, cursor_char: usize) -> Option<(String, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    if cursor_char == 0 || cursor_char >= chars.len() {
+        return None;
+    }
+    let prev = chars[cursor_char - 1];
+    let next = chars[cursor_char];
+
+    let is_pair = matches!(
+        (prev, next),
+        ('(', ')') | ('[', ']') | ('{', '}') | ('"', '"') | ('\'', '\'') | ('`', '`')
+    );
+
+    if is_pair {
+        let mut new_text = String::with_capacity(text.len().saturating_sub(2));
+        new_text.extend(chars[..cursor_char - 1].iter());
+        new_text.extend(chars[cursor_char + 1..].iter());
+        Some((new_text, cursor_char - 1))
+    } else {
+        None
+    }
+}
+
+/// Converts 1-based (line, column) coordinates into a 0-based byte offset in `text`.
+/// If `target_line` exceeds the number of lines, returns `text.len()`.
+/// If `target_col` exceeds the line length, returns the end of that line.
+pub fn line_col_to_byte_offset(text: &str, target_line: usize, target_col: usize) -> usize {
+    let mut current_line = 1;
+    let mut line_start_byte = 0;
+
+    if target_line <= 1 {
+        line_start_byte = 0;
+    } else {
+        for (byte_idx, ch) in text.char_indices() {
+            if ch == '\n' {
+                current_line += 1;
+                if current_line == target_line {
+                    line_start_byte = byte_idx + 1;
+                    break;
+                }
+            }
+        }
+        if current_line < target_line {
+            return text.len();
+        }
+    }
+
+    let col_chars = target_col.saturating_sub(1);
+    let line_slice = &text[line_start_byte..];
+    let mut char_count = 0;
+    for (offset, ch) in line_slice.char_indices() {
+        if char_count == col_chars || ch == '\n' {
+            return line_start_byte + offset;
+        }
+        char_count += 1;
+    }
+    line_start_byte + line_slice.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +440,43 @@ mod tests {
         let text = "fn foo(x: i32) {}";
         let m = find_matching_bracket(text, 7); // after '('
         assert_eq!(m, Some(13)); // index of ')'
+    }
+
+    #[test]
+    fn test_auto_close_pair() {
+        // Single cursor insert
+        let (res, s, e) = handle_auto_close_pair("let x = ", 8, 8, '(').unwrap();
+        assert_eq!(res, "let x = ()");
+        assert_eq!(s, 9);
+        assert_eq!(e, 9);
+
+        // Selection wrap
+        let (res, s, e) = handle_auto_close_pair("hello world", 0, 5, '"').unwrap();
+        assert_eq!(res, "\"hello\" world");
+        assert_eq!(s, 1);
+        assert_eq!(e, 6);
+    }
+
+    #[test]
+    fn test_auto_backspace_pair() {
+        let (res, pos) = handle_auto_backspace_pair("foo()bar", 4).unwrap();
+        assert_eq!(res, "foobar");
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn test_should_skip_closing_char() {
+        assert!(should_skip_closing_char("foo()", 4, ')'));
+        assert!(!should_skip_closing_char("foo()", 3, ')'));
+    }
+
+    #[test]
+    fn test_line_col_to_byte_offset() {
+        let text = "alpha\nbeta\ngamma";
+        assert_eq!(line_col_to_byte_offset(text, 1, 1), 0);
+        assert_eq!(line_col_to_byte_offset(text, 1, 3), 2); // 'p'
+        assert_eq!(line_col_to_byte_offset(text, 2, 1), 6); // 'b'
+        assert_eq!(line_col_to_byte_offset(text, 3, 2), 12); // 'a' in gamma
+        assert_eq!(line_col_to_byte_offset(text, 99, 1), text.len());
     }
 }

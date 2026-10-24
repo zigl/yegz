@@ -52,6 +52,12 @@ pub struct Settings {
     pub tab_size: usize,
     pub word_wrap: bool,
     pub show_line_numbers: bool,
+    #[serde(default = "default_true")]
+    pub auto_close_pairs: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -62,6 +68,7 @@ impl Default for Settings {
             tab_size: 4,
             word_wrap: false,
             show_line_numbers: true,
+            auto_close_pairs: true,
         }
     }
 }
@@ -74,6 +81,26 @@ pub struct SessionState {
     pub sidebar_width: f32,
     pub window_size: [f32; 2],
     pub settings: Settings,
+    #[serde(default)]
+    pub recent_files: Vec<PathBuf>,
+    #[serde(default)]
+    pub recent_projects: Vec<PathBuf>,
+}
+
+impl SessionState {
+    #[allow(dead_code)]
+    pub fn add_recent_file(&mut self, path: PathBuf) {
+        self.recent_files.retain(|p| p != &path);
+        self.recent_files.insert(0, path);
+        self.recent_files.truncate(20);
+    }
+
+    #[allow(dead_code)]
+    pub fn add_recent_project(&mut self, path: PathBuf) {
+        self.recent_projects.retain(|p| p != &path);
+        self.recent_projects.insert(0, path);
+        self.recent_projects.truncate(10);
+    }
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -125,7 +152,10 @@ mod tests {
                 tab_size: 2,
                 word_wrap: true,
                 show_line_numbers: true,
+                auto_close_pairs: true,
             },
+            recent_files: vec![PathBuf::from("/test/a.rs")],
+            recent_projects: vec![PathBuf::from("/test")],
         };
         let s = serde_json::to_string(&state).unwrap();
         let loaded: SessionState = serde_json::from_str(&s).unwrap();
