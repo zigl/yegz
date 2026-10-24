@@ -24,7 +24,7 @@ use fuzzy::FuzzyFinder;
 use git::{FileGitStatus, GitRepoStatus};
 use search::ProjectSearch;
 use session::{SessionState, Settings, ThemeName};
-use terminal::{detect_project_tasks, LineKind, ProjectTask, TerminalDrawer};
+use terminal::{detect_project_tasks, render_native_terminal, ProjectTask, TerminalDrawer};
 use updater::{AutoUpdater, UpdateState};
 use viewers::{ImageView, PdfView};
 
@@ -759,7 +759,7 @@ impl Editor {
 
         // Toggle Terminal Drawer (⌃` or ⌘`)
         if hit(Modifiers::CTRL, Key::Backtick) || hit(cmd, Key::Backtick) {
-            self.terminal.toggle();
+            self.terminal.toggle(self.root.as_deref());
         }
 
         // Fuzzy Finder (⌘P)
@@ -1309,7 +1309,7 @@ impl Editor {
 
             let term_label = if self.terminal.open { "💻 Terminal [ON]" } else { "💻 Terminal" };
             if ui.selectable_label(self.terminal.open, term_label).on_hover_text("Toggle Terminal & Tasks Drawer (⌃`)").clicked() {
-                self.terminal.toggle();
+                self.terminal.toggle(self.root.as_deref());
             }
 
             let sidebar_label = if self.show_sidebar { "◧ Sidebar" } else { "◨ Sidebar" };
@@ -1828,7 +1828,7 @@ impl Editor {
                     RichText::new("💻 Terminal").small()
                 };
                 if ui.selectable_label(self.terminal.open, term_text).on_hover_text("Toggle Terminal & Tasks Drawer (⌃`)").clicked() {
-                    self.terminal.toggle();
+                    self.terminal.toggle(self.root.as_deref());
                 }
                 ui.label(sep.clone());
 
@@ -1908,37 +1908,25 @@ impl Editor {
     }
 
     fn terminal_drawer_ui(&mut self, ui: &mut egui::Ui) {
+        let root = self.root.clone();
+
         // 1. Top bar of terminal drawer
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(RichText::new("💻 TERMINAL & TASKS").size(11.0).strong().color(Color32::from_rgb(130, 140, 155)));
+            ui.label(RichText::new("💻 TERMINAL").size(11.0).strong().color(Color32::from_rgb(130, 140, 155)));
 
             ui.separator();
 
             // Project tasks quick buttons (e.g. npm run dev, cargo check, etc.)
             if self.project_tasks.is_empty() {
-                ui.label(RichText::new("No package.json/cargo tasks detected").small().color(Color32::GRAY));
+                ui.label(RichText::new("No package.json / cargo scripts detected").small().color(Color32::GRAY));
             } else {
-                let root = self.root.clone();
                 egui::ScrollArea::horizontal().max_height(24.0).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for task in self.project_tasks.iter().take(8) {
-                            let is_running_this = self.terminal.running_command.as_deref() == Some(&task.command);
-                            let btn_text = if is_running_this {
-                                format!("■ Stop {}", task.name)
-                            } else {
-                                format!("▶ {}", task.name)
-                            };
-                            let mut btn = egui::Button::new(RichText::new(btn_text).small());
-                            if is_running_this {
-                                btn = btn.fill(Color32::from_rgb(180, 50, 50));
-                            }
-                            if ui.add(btn).on_hover_text(format!("Run '{}' ({})", task.command, task.source)).clicked() {
-                                if is_running_this {
-                                    self.terminal.stop();
-                                } else {
-                                    self.terminal.execute(&task.command, root.as_deref());
-                                }
+                            let btn = egui::Button::new(RichText::new(format!("▶ {}", task.name)).small());
+                            if ui.add(btn).on_hover_text(format!("Execute '{}' in native terminal", task.command)).clicked() {
+                                self.terminal.run_command(&task.command, root.as_deref());
                             }
                         }
                     });
@@ -1949,14 +1937,11 @@ impl Editor {
                 if ui.small_button("×").on_hover_text("Close Terminal (⌃`)").clicked() {
                     self.terminal.open = false;
                 }
-                if ui.small_button("Clear").on_hover_text("Clear terminal output").clicked() {
+                if ui.small_button("🧹 Clear").on_hover_text("Clear terminal screen (Ctrl+L)").clicked() {
                     self.terminal.clear();
                 }
-                if self.terminal.is_running() {
-                    if ui.button(RichText::new("■ Stop").color(Color32::from_rgb(224, 108, 117))).clicked() {
-                        self.terminal.stop();
-                    }
-                    ui.spinner();
+                if ui.small_button("⟳ Reset").on_hover_text("Restart interactive shell").clicked() {
+                    self.terminal.restart_shell(root.as_deref());
                 }
             });
         });
@@ -1965,92 +1950,8 @@ impl Editor {
         ui.separator();
         ui.add_space(2.0);
 
-        // 2. Output ScrollArea
-        let dark_bg = Color32::from_rgb(24, 26, 31);
-        let output_height = (ui.available_height() - 36.0).max(60.0);
-
-        egui::Frame::NONE.fill(dark_bg).inner_margin(6.0).show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("terminal_output_scroll")
-                .max_height(output_height)
-                .stick_to_bottom(self.terminal.autoscroll)
-                .show(ui, |ui| {
-                    ui.style_mut().spacing.item_spacing.y = 1.0;
-                    if self.terminal.lines.is_empty() {
-                        ui.label(RichText::new("Terminal ready. Click a project script above or enter a shell command below.").monospace().size(12.0).color(Color32::GRAY));
-                    } else {
-                        for line in &self.terminal.lines {
-                            let text = RichText::new(&line.text).monospace().size(12.0);
-                            let colored = match line.kind {
-                                LineKind::Stdout => text.color(Color32::from_rgb(215, 222, 234)),
-                                LineKind::Stderr => text.color(Color32::from_rgb(224, 108, 117)),
-                                LineKind::Info => text.color(Color32::from_rgb(97, 175, 239)).strong(),
-                                LineKind::Success => text.color(Color32::from_rgb(152, 195, 121)).strong(),
-                                LineKind::Error => text.color(Color32::from_rgb(224, 108, 117)).strong(),
-                            };
-                            ui.label(colored);
-                        }
-                    }
-                });
-        });
-
-        ui.add_space(3.0);
-
-        // 3. Command input line
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("❯").monospace().strong().color(Color32::from_rgb(97, 175, 239)));
-            let text_res = ui.add(
-                egui::TextEdit::singleline(&mut self.terminal.input)
-                    .hint_text("Type a shell command (e.g. npm test, cargo check, git status)…")
-                    .desired_width(ui.available_width() - 80.0)
-                    .font(egui::TextStyle::Monospace),
-            );
-
-            let mut run_cmd = false;
-            if ui.input(|i| i.key_pressed(Key::Enter)) && text_res.has_focus() {
-                run_cmd = true;
-            }
-
-            // History navigation
-            if text_res.has_focus() {
-                if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
-                    if !self.terminal.history.is_empty() {
-                        let next_idx = match self.terminal.history_idx {
-                            Some(0) => 0,
-                            Some(i) => i - 1,
-                            None => self.terminal.history.len() - 1,
-                        };
-                        self.terminal.history_idx = Some(next_idx);
-                        self.terminal.input = self.terminal.history[next_idx].clone();
-                    }
-                }
-                if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
-                    if let Some(i) = self.terminal.history_idx {
-                        if i + 1 < self.terminal.history.len() {
-                            let next_idx = i + 1;
-                            self.terminal.history_idx = Some(next_idx);
-                            self.terminal.input = self.terminal.history[next_idx].clone();
-                        } else {
-                            self.terminal.history_idx = None;
-                            self.terminal.input.clear();
-                        }
-                    }
-                }
-            }
-
-            if ui.button("Run").clicked() {
-                run_cmd = true;
-            }
-
-            if run_cmd {
-                let cmd = self.terminal.input.trim().to_string();
-                if !cmd.is_empty() {
-                    self.terminal.input.clear();
-                    let root = self.root.clone();
-                    self.terminal.execute(&cmd, root.as_deref());
-                }
-            }
-        });
+        // 2. Native Interactive Terminal Canvas
+        render_native_terminal(ui, &mut self.terminal, root.as_deref());
     }
 
     // ----- Modals & Palettes -----------------------------------------------
@@ -2189,7 +2090,7 @@ impl Editor {
                 }
             }
             "view.toggle_sidebar" => self.show_sidebar = !self.show_sidebar,
-            "view.toggle_terminal" => self.terminal.toggle(),
+            "view.toggle_terminal" => self.terminal.toggle(self.root.as_deref()),
             "terminal.clear" => self.terminal.clear(),
             "view.toggle_split" => {
                 self.split_view = !self.split_view;
@@ -3073,7 +2974,6 @@ impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.updater.poll();
-        self.terminal.poll();
 
         // Check for dropped files (drag and drop from Finder)
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
