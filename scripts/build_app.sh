@@ -4,7 +4,9 @@ set -e
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DIR"
 
-echo "Building release binary..."
+VERSION=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+
+echo "Building release binary for Yegz v${VERSION}..."
 cargo build --release
 
 APP="target/release/Yegz.app"
@@ -16,7 +18,7 @@ cp target/release/yegz "$APP/Contents/MacOS/yegz"
 chmod +x "$APP/Contents/MacOS/yegz"
 cp scripts/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-cat > "$APP/Contents/Info.plist" <<'EOF'
+cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -28,9 +30,9 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleIdentifier</key>
     <string>com.yegz.editor</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>

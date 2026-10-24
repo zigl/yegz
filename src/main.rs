@@ -2417,7 +2417,7 @@ impl Editor {
                 // About Yegz & Links
                 ui.heading("About Yegz");
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Yegz v0.1.0").strong());
+                    ui.label(RichText::new(format!("Yegz v{}", env!("CARGO_PKG_VERSION"))).strong());
                     ui.label(RichText::new("— A powerful editor. Without the clutter.").color(ui.visuals().text_color().gamma_multiply(0.7)));
                 });
 
@@ -2476,7 +2476,7 @@ impl Editor {
                 ui.vertical_centered(|ui| {
                     ui.add_space(6.0);
                     ui.heading("Yegz");
-                    ui.label(RichText::new("Version 0.1.0").small().color(ui.visuals().text_color().gamma_multiply(0.7)));
+                    ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).small().color(ui.visuals().text_color().gamma_multiply(0.7)));
                     ui.add_space(4.0);
                     ui.label("A powerful editor. Without the clutter.");
                 });
