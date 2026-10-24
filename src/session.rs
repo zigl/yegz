@@ -56,6 +56,8 @@ pub struct Settings {
     pub auto_close_pairs: bool,
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    #[serde(default = "default_true")]
+    pub code_folding: bool,
 }
 
 fn default_true() -> bool {
@@ -72,6 +74,7 @@ impl Default for Settings {
             show_line_numbers: true,
             auto_close_pairs: true,
             auto_check_updates: true,
+            code_folding: true,
         }
     }
 }
@@ -157,6 +160,7 @@ mod tests {
                 show_line_numbers: true,
                 auto_close_pairs: true,
                 auto_check_updates: true,
+                code_folding: true,
             },
             recent_files: vec![PathBuf::from("/test/a.rs")],
             recent_projects: vec![PathBuf::from("/test")],

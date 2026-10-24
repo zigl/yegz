@@ -102,10 +102,28 @@ pub fn all_commands() -> Vec<EditorCommand> {
         // View & Layout
         EditorCommand { id: "view.toggle_sidebar", title: "Toggle File Tree Sidebar", category: "View", shortcut: Some("⌘B"), icon: "◧" },
         EditorCommand { id: "view.toggle_split", title: "Toggle Split View (Side-by-Side)", category: "View", shortcut: None, icon: "◫" },
-        EditorCommand { id: "view.toggle_terminal", title: "Toggle Terminal & Tasks Drawer", category: "View", shortcut: Some("⌃`"), icon: "💻" },
+        EditorCommand { id: "view.toggle_terminal", title: "Toggle Terminal & Console Drawer", category: "View", shortcut: Some("⌃`"), icon: "💻" },
+        EditorCommand { id: "view.open_logs", title: "Show Logs & Output", category: "View", shortcut: None, icon: "📋" },
+        EditorCommand { id: "view.open_errors", title: "Show Problems & Errors", category: "View", shortcut: None, icon: "⚠" },
         EditorCommand { id: "terminal.clear", title: "Clear Terminal Output", category: "Terminal", shortcut: None, icon: "🧹" },
         EditorCommand { id: "view.toggle_word_wrap", title: "Toggle Word Wrap", category: "View", shortcut: None, icon: "↩" },
         EditorCommand { id: "view.toggle_line_numbers", title: "Toggle Line Numbers", category: "View", shortcut: None, icon: "#" },
+        EditorCommand { id: "view.toggle_folding", title: "Toggle Code Folding Gutter", category: "View", shortcut: None, icon: "🪚" },
+
+        // Code Folding
+        EditorCommand { id: "editor.fold", title: "Fold Block at Cursor", category: "Edit", shortcut: Some("⌘⌥["), icon: "▶" },
+        EditorCommand { id: "editor.unfold", title: "Unfold Block at Cursor", category: "Edit", shortcut: Some("⌘⌥]"), icon: "▼" },
+        EditorCommand { id: "editor.fold_all", title: "Fold All Blocks", category: "Edit", shortcut: Some("⌘⌥⇧["), icon: "⏩" },
+        EditorCommand { id: "editor.unfold_all", title: "Unfold All Blocks", category: "Edit", shortcut: Some("⌘⌥⇧]"), icon: "⏪" },
+
+        // Git / Source Control
+        EditorCommand { id: "git.open_panel", title: "Show Git / Source Control", category: "Git", shortcut: Some("⌘⇧G"), icon: "🌿" },
+        EditorCommand { id: "git.switch_branch", title: "Switch / Checkout Branch…", category: "Git", shortcut: Some("⌘⇧B"), icon: "" },
+        EditorCommand { id: "git.stage_all", title: "Stage All Changes", category: "Git", shortcut: None, icon: "➕" },
+        EditorCommand { id: "git.unstage_all", title: "Unstage All Changes", category: "Git", shortcut: None, icon: "➖" },
+        EditorCommand { id: "git.commit", title: "Commit Staged Changes", category: "Git", shortcut: Some("⌘Enter"), icon: "✓" },
+        EditorCommand { id: "git.push", title: "Push Commits to Remote", category: "Git", shortcut: None, icon: "⬆" },
+        EditorCommand { id: "git.pull", title: "Pull Latest Changes from Remote", category: "Git", shortcut: None, icon: "⬇" },
 
         // Themes
         EditorCommand { id: "theme.onedark", title: "Theme: One Dark", category: "Theme", shortcut: None, icon: "🎨" },

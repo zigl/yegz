@@ -1,6 +1,6 @@
 [package]
 name = "yegz"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "A powerful, lightweight, Atom-inspired code and file editor built in Rust"
 homepage = "https://yegz.com"

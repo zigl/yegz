@@ -135,6 +135,8 @@ pub struct TerminalDrawer {
     pub height: f32,
     pub pty: Option<PtyTerminal>,
     pub blink_start: std::time::Instant,
+    pub focus_requested: bool,
+    pub focused: bool,
 }
 
 impl TerminalDrawer {
@@ -144,13 +146,21 @@ impl TerminalDrawer {
             height: 240.0,
             pty: None,
             blink_start: std::time::Instant::now(),
+            focus_requested: false,
+            focused: false,
         }
     }
 
     pub fn toggle(&mut self, working_dir: Option<&Path>) {
         self.open = !self.open;
-        if self.open && self.pty.is_none() {
-            self.ensure_pty(working_dir, 24, 80);
+        if self.open {
+            self.focus_requested = true;
+            self.focused = true;
+            if self.pty.is_none() {
+                self.ensure_pty(working_dir, 24, 80);
+            }
+        } else {
+            self.focused = false;
         }
     }
 
@@ -353,31 +363,34 @@ pub fn render_native_terminal(
     // Draw dark terminal background
     painter.rect_filled(rect, 4.0, Color32::from_rgb(24, 26, 31));
 
-    // Request focus on click
-    if response.clicked() {
+    // Request focus on click or when requested
+    if response.clicked() || drawer.focus_requested {
         response.request_focus();
+        drawer.focus_requested = false;
+        drawer.focused = true;
     }
 
-    let has_focus = response.has_focus();
+    let has_focus = response.has_focus() || drawer.focused;
+    drawer.focused = has_focus;
     if has_focus {
         // Subtle outline when focused
         painter.rect_stroke(
             rect,
             4.0,
-            Stroke::new(1.0, Color32::from_rgb(97, 175, 239).gamma_multiply(0.5)),
+            Stroke::new(1.0, Color32::from_rgb(97, 175, 239).gamma_multiply(0.6)),
             egui::StrokeKind::Inside,
         );
     }
 
-    // Process keyboard inputs when focused
+    // Process and CONSUME keyboard inputs when focused so they do not leak into the code editor
     if has_focus {
         let mut input_bytes = Vec::new();
 
-        ui.input(|i| {
-            // Text events
-            for event in &i.events {
+        ui.input_mut(|i| {
+            let events = std::mem::take(&mut i.events);
+            for event in events {
                 match event {
-                    egui::Event::Text(text) => {
+                    egui::Event::Text(ref text) => {
                         input_bytes.extend_from_slice(text.as_bytes());
                     }
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
@@ -394,6 +407,7 @@ pub fn render_native_terminal(
                                 Key::A => input_bytes.push(0x01), // Ctrl+A
                                 Key::E => input_bytes.push(0x05), // Ctrl+E
                                 Key::R => input_bytes.push(0x12), // Ctrl+R
+                                Key::K => input_bytes.push(0x0b), // Ctrl+K
                                 _ => {}
                             }
                         } else {
@@ -414,7 +428,12 @@ pub fn render_native_terminal(
                             }
                         }
                     }
-                    _ => {}
+                    egui::Event::Key { .. } => {
+                        // Consume key release events while terminal is focused
+                    }
+                    other => {
+                        i.events.push(other);
+                    }
                 }
             }
         });

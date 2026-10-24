@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 mod commands;
 mod editor_ops;
+mod folding;
 mod fuzzy;
 mod git;
 mod search;
@@ -41,6 +42,14 @@ fn main() -> eframe::Result {
         .with_title("Yegz")
         .with_inner_size(if initial_size[0] > 100.0 { initial_size } else { [1100.0, 720.0] })
         .with_min_inner_size([400.0, 300.0]);
+
+    #[cfg(target_os = "macos")]
+    {
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false);
+    }
 
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
@@ -156,10 +165,47 @@ fn apply_theme(ctx: &egui::Context, settings: &Settings) {
 
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarTab {
+    Files,
+    Git,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BottomPanelTab {
+    Terminal,
+    Logs,
+    Errors,
+    Tasks,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppLogEntry {
+    pub time: String,
+    pub level: LogLevel,
+    pub source: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct DiffView {
+    pub file_path: PathBuf,
+    pub rel_path: String,
+    pub lines: Vec<git::DiffLine>,
+}
+
 enum View {
     Text,
     Image(ImageView),
     Pdf(PdfView),
+    Diff(DiffView),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -192,6 +238,10 @@ struct Tab {
     disk_changed: bool,
     cached_line_count: usize,
     cached_line_numbers: String,
+    fold_ranges: Vec<folding::FoldRange>,
+    active_folds: Vec<folding::ActiveFold>,
+    gutter_changes: Vec<git::GutterChange>,
+    last_gutter_check: Option<std::time::Instant>,
 }
 
 impl Tab {
@@ -209,11 +259,26 @@ impl Tab {
             disk_changed: false,
             cached_line_count: 1,
             cached_line_numbers: "  1".into(),
+            fold_ranges: Vec::new(),
+            active_folds: Vec::new(),
+            gutter_changes: Vec::new(),
+            last_gutter_check: None,
         }
     }
 
     fn is_markdown(&self) -> bool {
         matches!(self.view, View::Text) && self.syntax == "Markdown"
+    }
+
+    fn get_text_for_save(&self) -> String {
+        if self.active_folds.is_empty() {
+            return self.text.clone();
+        }
+        let mut result = self.text.clone();
+        for fold in self.active_folds.iter().rev() {
+            result = result.replace(&fold.placeholder, &fold.hidden_lines);
+        }
+        result
     }
 
     fn open(path: &Path, ctx: &egui::Context) -> Result<Self, String> {
@@ -269,6 +334,7 @@ impl Tab {
         let count = self.text.lines().count().max(1) + usize::from(self.text.ends_with('\n'));
         if count != self.cached_line_count || self.cached_line_numbers.is_empty() {
             self.cached_line_count = count;
+            self.fold_ranges = folding::detect_fold_ranges(&self.text, &self.syntax);
             let digits = count.to_string().len().max(3);
             let mut s = String::with_capacity(count * (digits + 1));
             for n in 1..=count {
@@ -280,10 +346,13 @@ impl Tab {
     }
 
     fn dirty(&self) -> bool {
-        self.text != self.saved
+        self.get_text_for_save() != self.saved
     }
 
     fn title(&self) -> String {
+        if let View::Diff(diff) = &self.view {
+            return format!("Diff: {}", diff.rel_path);
+        }
         self.path
             .as_ref()
             .and_then(|p| p.file_name())
@@ -357,6 +426,20 @@ struct Editor {
 
     tree_modal: Option<TreeModal>,
     modal_input: String,
+
+    // Git Suite
+    sidebar_tab: SidebarTab,
+    git_commit_msg: String,
+    branch_switcher_open: bool,
+    branch_search: String,
+    cached_branches: Vec<String>,
+    new_branch_input: String,
+    show_new_branch_dialog: bool,
+    branch_selected: usize,
+
+    // Bottom Panel (Terminal, Logs, Errors, Tasks)
+    bottom_panel_tab: BottomPanelTab,
+    logs: Vec<AppLogEntry>,
 }
 
 impl Editor {
@@ -408,6 +491,18 @@ impl Editor {
 
             tree_modal: None,
             modal_input: String::new(),
+
+            sidebar_tab: SidebarTab::Files,
+            git_commit_msg: String::new(),
+            branch_switcher_open: false,
+            branch_search: String::new(),
+            cached_branches: Vec::new(),
+            new_branch_input: String::new(),
+            show_new_branch_dialog: false,
+            branch_selected: 0,
+
+            bottom_panel_tab: BottomPanelTab::Terminal,
+            logs: Vec::new(),
         };
 
         let mut restored = false;
@@ -456,6 +551,38 @@ impl Editor {
         }
 
         ed
+    }
+
+    fn log(&mut self, level: LogLevel, source: &str, msg: &str) {
+        let now = std::time::SystemTime::now();
+        let duration = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let secs = duration.as_secs();
+        let hours = (secs / 3600) % 24;
+        let mins = (secs / 60) % 60;
+        let s = secs % 60;
+        let time = format!("{hours:02}:{mins:02}:{s:02}");
+
+        let first_line = msg.lines().next().unwrap_or("").trim();
+        self.status = if first_line.chars().count() > 70 {
+            format!("{}…", first_line.chars().take(70).collect::<String>())
+        } else {
+            first_line.to_string()
+        };
+
+        self.logs.push(AppLogEntry {
+            time,
+            level,
+            source: source.to_string(),
+            message: msg.to_string(),
+        });
+    }
+
+    fn log_info(&mut self, source: &str, msg: &str) {
+        self.log(LogLevel::Info, source, msg);
+    }
+
+    fn log_error(&mut self, source: &str, msg: &str) {
+        self.log(LogLevel::Error, source, msg);
     }
 
     fn set_root(&mut self, root: Option<&Path>) {
@@ -569,9 +696,10 @@ impl Editor {
             }
         };
 
-        match fs::write(&path, &tab.text) {
+        let content = tab.get_text_for_save();
+        match fs::write(&path, &content) {
             Ok(()) => {
-                tab.saved = tab.text.clone();
+                tab.saved = content;
                 if tab.path.as_deref() != Some(path.as_path()) {
                     tab.syntax = syntax::detect(Some(&path), &tab.text);
                 }
@@ -730,6 +858,81 @@ impl Editor {
         egui::Id::unique(("editor", self.active, self.tabs[self.active].path.clone()))
     }
 
+    // ----- Code Folding ----------------------------------------------------
+
+    fn fold_at_line(&mut self, tab_idx: usize, line: usize) {
+        let tab = &mut self.tabs[tab_idx];
+        if let Some(range) = tab.fold_ranges.iter().find(|r| r.start_line == line).cloned() {
+            if let Some((new_text, active_fold)) = folding::fold_block(&tab.text, &range) {
+                tab.text = new_text;
+                tab.active_folds.push(active_fold);
+                tab.recalculate_line_numbers();
+                self.status = format!("Folded block at line {line}");
+            }
+        }
+    }
+
+    fn unfold_at_line(&mut self, tab_idx: usize, line: usize) {
+        let tab = &mut self.tabs[tab_idx];
+        if let Some(pos) = tab.active_folds.iter().position(|f| f.start_line == line) {
+            let fold = tab.active_folds.remove(pos);
+            tab.text = folding::unfold_block(&tab.text, &fold);
+            tab.recalculate_line_numbers();
+            self.status = format!("Unfolded block at line {line}");
+        }
+    }
+
+    fn fold_current_block(&mut self) {
+        let (current_line, _, _) = CURSOR.with(|c| *c.borrow());
+        let tab = &self.tabs[self.active];
+        let best_range = tab
+            .fold_ranges
+            .iter()
+            .filter(|r| r.start_line <= current_line && r.end_line >= current_line)
+            .min_by_key(|r| r.end_line - r.start_line)
+            .cloned();
+
+        if let Some(range) = best_range {
+            self.fold_at_line(self.active, range.start_line);
+        }
+    }
+
+    fn unfold_current_block(&mut self) {
+        let (current_line, _, _) = CURSOR.with(|c| *c.borrow());
+        let has_fold_at_cursor = self.tabs[self.active].active_folds.iter().any(|f| f.start_line == current_line);
+        if has_fold_at_cursor {
+            self.unfold_at_line(self.active, current_line);
+        } else if !self.tabs[self.active].active_folds.is_empty() {
+            let fold = self.tabs[self.active].active_folds.pop().unwrap();
+            let tab = &mut self.tabs[self.active];
+            tab.text = folding::unfold_block(&tab.text, &fold);
+            tab.recalculate_line_numbers();
+            self.status = "Unfolded block".into();
+        }
+    }
+
+    fn fold_all(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        let ranges = tab.fold_ranges.clone();
+        for range in ranges.iter().rev() {
+            if let Some((new_text, active_fold)) = folding::fold_block(&tab.text, range) {
+                tab.text = new_text;
+                tab.active_folds.push(active_fold);
+            }
+        }
+        tab.recalculate_line_numbers();
+        self.status = "Folded all blocks".into();
+    }
+
+    fn unfold_all(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        while let Some(fold) = tab.active_folds.pop() {
+            tab.text = folding::unfold_block(&tab.text, &fold);
+        }
+        tab.recalculate_line_numbers();
+        self.status = "Unfolded all blocks".into();
+    }
+
     // ----- UI & Shortcuts --------------------------------------------------
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -770,6 +973,18 @@ impl Editor {
         // Project Search (⌘⇧F)
         if hit(cmd_shift, Key::F) {
             self.project_search.open = true;
+        }
+
+        // Git / Source Control Panel (⌘⇧G)
+        if hit(cmd_shift, Key::G) {
+            self.show_sidebar = true;
+            self.sidebar_tab = SidebarTab::Git;
+            self.git.refresh(self.root.as_deref());
+        }
+
+        // Switch / Checkout Branch (⌘⇧B)
+        if hit(cmd_shift, Key::B) {
+            self.open_branch_switcher();
         }
 
         // Settings (⌘,)
@@ -847,164 +1062,182 @@ impl Editor {
             self.active = (self.active + n - 1) % n;
         }
 
+        let cmd_alt = Modifiers::COMMAND | Modifiers::ALT;
+        let cmd_alt_shift = Modifiers::COMMAND | Modifiers::ALT | Modifiers::SHIFT;
+
+        // Folding shortcuts: ⌘⌥[ (Fold), ⌘⌥] (Unfold), ⌘⌥⇧[ (Fold All), ⌘⌥⇧] (Unfold All)
+        if hit(cmd_alt_shift, Key::OpenBracket) {
+            self.fold_all();
+        } else if hit(cmd_alt, Key::OpenBracket) {
+            self.fold_current_block();
+        }
+        if hit(cmd_alt_shift, Key::CloseBracket) {
+            self.unfold_all();
+        } else if hit(cmd_alt, Key::CloseBracket) {
+            self.unfold_current_block();
+        }
+
         // Code editing shortcuts:
         let id = self.editor_id();
-        let is_editor_focused = ctx.memory(|m| match m.focused() {
+        let is_editor_focused = !self.terminal.focused && ctx.memory(|m| match m.focused() {
             Some(focused_id) => focused_id == id,
-            None => true,
+            None => !self.terminal.open,
         });
-        let state = egui::TextEdit::load_state(ctx, id);
 
-        if let Some(mut state) = state {
-            let char_range = state.cursor.char_range();
-            let (cursor_start, cursor_end) = char_range
-                .map(|r| (r.primary.index.0, r.secondary.index.0))
-                .unwrap_or((0, 0));
+        if is_editor_focused {
+            let state = egui::TextEdit::load_state(ctx, id);
 
-            // Toggle comment (⌘/)
-            if hit(cmd, Key::Slash) {
-                let tab = &mut self.tabs[self.active];
-                let (new_text, _, _) = editor_ops::toggle_comment(&tab.text, cursor_start, cursor_end, &tab.syntax);
-                tab.text = new_text;
-                tab.recalculate_line_numbers();
-            }
+            if let Some(mut state) = state {
+                let char_range = state.cursor.char_range();
+                let (cursor_start, cursor_end) = char_range
+                    .map(|r| (r.primary.index.0, r.secondary.index.0))
+                    .unwrap_or((0, 0));
 
-            // Duplicate line (⌘⇧D)
-            if hit(cmd_shift, Key::D) {
-                let tab = &mut self.tabs[self.active];
-                let (new_text, new_cursor) = editor_ops::duplicate_line(&tab.text, cursor_start);
-                tab.text = new_text;
-                tab.recalculate_line_numbers();
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
-                state.clone().store(ctx, id);
-            }
-
-            // Move line up (⌥↑) / down (⌥↓)
-            if hit(alt, Key::ArrowUp) {
-                let tab = &mut self.tabs[self.active];
-                let (new_text, new_cursor) = editor_ops::move_line(&tab.text, cursor_start, true);
-                tab.text = new_text;
-                tab.recalculate_line_numbers();
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
-                state.clone().store(ctx, id);
-            }
-            if hit(alt, Key::ArrowDown) {
-                let tab = &mut self.tabs[self.active];
-                let (new_text, new_cursor) = editor_ops::move_line(&tab.text, cursor_start, false);
-                tab.text = new_text;
-                tab.recalculate_line_numbers();
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
-                state.clone().store(ctx, id);
-            }
-
-            // Tab / Shift-Tab Indent & Dedent
-            if is_editor_focused && hit(Modifiers::NONE, Key::Tab) {
-                let tab = &mut self.tabs[self.active];
-                if !tab.read_only {
-                    if cursor_start != cursor_end {
-                        let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, false, self.settings.tab_size);
-                        tab.text = new_text;
-                        tab.recalculate_line_numbers();
-                        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
-                        state.clone().store(ctx, id);
-                    } else {
-                        let indent = " ".repeat(self.settings.tab_size);
-                        let chars: Vec<char> = tab.text.chars().collect();
-                        let idx = cursor_start.min(chars.len());
-                        let mut new_text = String::with_capacity(tab.text.len() + indent.len());
-                        new_text.extend(chars[..idx].iter());
-                        new_text.push_str(&indent);
-                        new_text.extend(chars[idx..].iter());
-                        tab.text = new_text;
-                        tab.recalculate_line_numbers();
-                        let new_pos = idx + self.settings.tab_size;
-                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_pos))));
-                        state.clone().store(ctx, id);
-                    }
-                }
-            }
-            if is_editor_focused && hit(Modifiers::SHIFT, Key::Tab) {
-                let tab = &mut self.tabs[self.active];
-                if !tab.read_only {
-                    let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, true, self.settings.tab_size);
+                // Toggle comment (⌘/)
+                if hit(cmd, Key::Slash) {
+                    let tab = &mut self.tabs[self.active];
+                    let (new_text, _, _) = editor_ops::toggle_comment(&tab.text, cursor_start, cursor_end, &tab.syntax);
                     tab.text = new_text;
                     tab.recalculate_line_numbers();
-                    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
+                }
+
+                // Duplicate line (⌘⇧D)
+                if hit(cmd_shift, Key::D) {
+                    let tab = &mut self.tabs[self.active];
+                    let (new_text, new_cursor) = editor_ops::duplicate_line(&tab.text, cursor_start);
+                    tab.text = new_text;
+                    tab.recalculate_line_numbers();
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
                     state.clone().store(ctx, id);
                 }
-            }
 
-            // Auto-indent on Enter
-            if hit(Modifiers::NONE, Key::Enter) {
-                let tab = &mut self.tabs[self.active];
-                let indent_insert = editor_ops::compute_auto_indent(&tab.text, cursor_start, self.settings.tab_size);
-                let chars: Vec<char> = tab.text.chars().collect();
-                let min_c = cursor_start.min(cursor_end);
-                let max_c = cursor_start.max(cursor_end);
-                let mut new_text = String::with_capacity(tab.text.len() + indent_insert.len());
-                new_text.extend(chars[..min_c].iter());
-                new_text.push_str(&indent_insert);
-                new_text.extend(chars[max_c..].iter());
-                tab.text = new_text;
-                tab.recalculate_line_numbers();
-                let new_pos = min_c + indent_insert.chars().count();
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_pos))));
-                state.clone().store(ctx, id);
-            }
+                // Move line up (⌥↑) / down (⌥↓)
+                if hit(alt, Key::ArrowUp) {
+                    let tab = &mut self.tabs[self.active];
+                    let (new_text, new_cursor) = editor_ops::move_line(&tab.text, cursor_start, true);
+                    tab.text = new_text;
+                    tab.recalculate_line_numbers();
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
+                    state.clone().store(ctx, id);
+                }
+                if hit(alt, Key::ArrowDown) {
+                    let tab = &mut self.tabs[self.active];
+                    let (new_text, new_cursor) = editor_ops::move_line(&tab.text, cursor_start, false);
+                    tab.text = new_text;
+                    tab.recalculate_line_numbers();
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
+                    state.clone().store(ctx, id);
+                }
 
-            // Auto-close pairs & wrap selection
-            if is_editor_focused && self.settings.auto_close_pairs {
-                let mut char_to_insert = None;
-                ctx.input_mut(|i| {
-                    if let Some(pos) = i.events.iter().position(|e| match e {
-                        egui::Event::Text(s) => matches!(s.as_str(), "(" | "[" | "{" | "\"" | "'" | "`" | ")" | "]" | "}"),
-                        _ => false,
-                    }) {
-                        if let egui::Event::Text(s) = i.events.remove(pos) {
-                            if let Some(ch) = s.chars().next() {
-                                char_to_insert = Some(ch);
-                            }
-                        }
-                    }
-                });
-
-                if let Some(ch) = char_to_insert {
+                // Tab / Shift-Tab Indent & Dedent
+                if hit(Modifiers::NONE, Key::Tab) {
                     let tab = &mut self.tabs[self.active];
                     if !tab.read_only {
-                        if matches!(ch, ')' | ']' | '}') && editor_ops::should_skip_closing_char(&tab.text, cursor_start, ch) && cursor_start == cursor_end {
-                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_start + 1))));
-                            state.clone().store(ctx, id);
-                        } else if let Some((new_text, s, e)) = editor_ops::handle_auto_close_pair(&tab.text, cursor_start, cursor_end, ch) {
+                        if cursor_start != cursor_end {
+                            let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, false, self.settings.tab_size);
                             tab.text = new_text;
                             tab.recalculate_line_numbers();
                             state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
                             state.clone().store(ctx, id);
                         } else {
+                            let indent = " ".repeat(self.settings.tab_size);
                             let chars: Vec<char> = tab.text.chars().collect();
-                            let min_c = cursor_start.min(cursor_end);
-                            let max_c = cursor_start.max(cursor_end);
-                            let mut new_text = String::with_capacity(tab.text.len() + 1);
-                            new_text.extend(chars[..min_c].iter());
-                            new_text.push(ch);
-                            new_text.extend(chars[max_c..].iter());
+                            let idx = cursor_start.min(chars.len());
+                            let mut new_text = String::with_capacity(tab.text.len() + indent.len());
+                            new_text.extend(chars[..idx].iter());
+                            new_text.push_str(&indent);
+                            new_text.extend(chars[idx..].iter());
                             tab.text = new_text;
                             tab.recalculate_line_numbers();
-                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(min_c + 1))));
+                            let new_pos = idx + self.settings.tab_size;
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_pos))));
                             state.clone().store(ctx, id);
                         }
                     }
                 }
-
-                // Auto-backspace pair deletion
-                if cursor_start == cursor_end && ctx.input(|i| i.key_pressed(Key::Backspace)) {
+                if hit(Modifiers::SHIFT, Key::Tab) {
                     let tab = &mut self.tabs[self.active];
                     if !tab.read_only {
-                        if let Some((new_text, new_pos)) = editor_ops::handle_auto_backspace_pair(&tab.text, cursor_start) {
-                            ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Backspace));
-                            tab.text = new_text;
-                            tab.recalculate_line_numbers();
-                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_pos))));
-                            state.clone().store(ctx, id);
+                        let (new_text, s, e) = editor_ops::indent_selection(&tab.text, cursor_start, cursor_end, true, self.settings.tab_size);
+                        tab.text = new_text;
+                        tab.recalculate_line_numbers();
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
+                        state.clone().store(ctx, id);
+                    }
+                }
+
+                // Auto-indent on Enter
+                if hit(Modifiers::NONE, Key::Enter) {
+                    let tab = &mut self.tabs[self.active];
+                    let indent_insert = editor_ops::compute_auto_indent(&tab.text, cursor_start, self.settings.tab_size);
+                    let chars: Vec<char> = tab.text.chars().collect();
+                    let min_c = cursor_start.min(cursor_end);
+                    let max_c = cursor_start.max(cursor_end);
+                    let mut new_text = String::with_capacity(tab.text.len() + indent_insert.len());
+                    new_text.extend(chars[..min_c].iter());
+                    new_text.push_str(&indent_insert);
+                    new_text.extend(chars[max_c..].iter());
+                    tab.text = new_text;
+                    tab.recalculate_line_numbers();
+                    let new_pos = min_c + indent_insert.chars().count();
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_pos))));
+                    state.clone().store(ctx, id);
+                }
+
+                // Auto-close pairs & wrap selection
+                if self.settings.auto_close_pairs {
+                    let mut char_to_insert = None;
+                    ctx.input_mut(|i| {
+                        if let Some(pos) = i.events.iter().position(|e| match e {
+                            egui::Event::Text(s) => matches!(s.as_str(), "(" | "[" | "{" | "\"" | "'" | "`" | ")" | "]" | "}"),
+                            _ => false,
+                        }) {
+                            if let egui::Event::Text(s) = i.events.remove(pos) {
+                                if let Some(ch) = s.chars().next() {
+                                    char_to_insert = Some(ch);
+                                }
+                            }
+                        }
+                    });
+
+                    if let Some(ch) = char_to_insert {
+                        let tab = &mut self.tabs[self.active];
+                        if !tab.read_only {
+                            if matches!(ch, ')' | ']' | '}') && editor_ops::should_skip_closing_char(&tab.text, cursor_start, ch) && cursor_start == cursor_end {
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_start + 1))));
+                                state.clone().store(ctx, id);
+                            } else if let Some((new_text, s, e)) = editor_ops::handle_auto_close_pair(&tab.text, cursor_start, cursor_end, ch) {
+                                tab.text = new_text;
+                                tab.recalculate_line_numbers();
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
+                                state.clone().store(ctx, id);
+                            } else {
+                                let chars: Vec<char> = tab.text.chars().collect();
+                                let min_c = cursor_start.min(cursor_end);
+                                let max_c = cursor_start.max(cursor_end);
+                                let mut new_text = String::with_capacity(tab.text.len() + 1);
+                                new_text.extend(chars[..min_c].iter());
+                                new_text.push(ch);
+                                new_text.extend(chars[max_c..].iter());
+                                tab.text = new_text;
+                                tab.recalculate_line_numbers();
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(min_c + 1))));
+                                state.clone().store(ctx, id);
+                            }
+                        }
+                    }
+
+                    // Auto-backspace pair deletion
+                    if cursor_start == cursor_end && ctx.input(|i| i.key_pressed(Key::Backspace)) {
+                        let tab = &mut self.tabs[self.active];
+                        if !tab.read_only {
+                            if let Some((new_text, new_pos)) = editor_ops::handle_auto_backspace_pair(&tab.text, cursor_start) {
+                                ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Backspace));
+                                tab.text = new_text;
+                                tab.recalculate_line_numbers();
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_pos))));
+                                state.clone().store(ctx, id);
+                            }
                         }
                     }
                 }
@@ -1090,11 +1323,13 @@ impl Editor {
 
                         if let Some(status) = git_status {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let (badge, color) = match status {
-                                    FileGitStatus::Modified => ("M", Color32::from_rgb(209, 154, 102)),
-                                    FileGitStatus::Untracked => ("U", Color32::from_rgb(152, 195, 121)),
-                                    FileGitStatus::Staged => ("A", Color32::from_rgb(97, 175, 239)),
-                                    FileGitStatus::Deleted => ("D", Color32::from_rgb(224, 108, 117)),
+                                let badge = status.badge();
+                                let color = match status {
+                                    FileGitStatus::Modified => Color32::from_rgb(209, 154, 102),
+                                    FileGitStatus::Untracked => Color32::from_rgb(152, 195, 121),
+                                    FileGitStatus::Staged => Color32::from_rgb(97, 175, 239),
+                                    FileGitStatus::Deleted => Color32::from_rgb(224, 108, 117),
+                                    FileGitStatus::Renamed => Color32::from_rgb(152, 195, 121),
                                 };
                                 ui.label(RichText::new(badge).small().strong().color(color));
                             });
@@ -1209,13 +1444,44 @@ impl Editor {
             return;
         };
 
+        // Sidebar switcher: [📁 Files] [🌿 Git (N)]
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("PROJECT EXPLORER")
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let files_active = self.sidebar_tab == SidebarTab::Files;
+            let files_btn = egui::Button::new(
+                RichText::new("📁 Files")
                     .size(11.0)
                     .strong()
-                    .color(Color32::from_rgb(130, 140, 155)),
-            );
+                    .color(if files_active { ui.visuals().strong_text_color() } else { ui.visuals().text_color().gamma_multiply(0.7) })
+            )
+            .fill(if files_active { ui.visuals().selection.bg_fill.gamma_multiply(0.6) } else { Color32::TRANSPARENT })
+            .corner_radius(egui::CornerRadius::same(4));
+
+            if ui.add(files_btn).clicked() {
+                self.sidebar_tab = SidebarTab::Files;
+            }
+
+            let git_active = self.sidebar_tab == SidebarTab::Git;
+            let changes_cnt = self.git.total_changes_count();
+            let git_label = if changes_cnt > 0 {
+                format!("🌿 Git ({changes_cnt})")
+            } else {
+                "🌿 Git".to_string()
+            };
+            let git_btn = egui::Button::new(
+                RichText::new(git_label)
+                    .size(11.0)
+                    .strong()
+                    .color(if git_active { ui.visuals().strong_text_color() } else { ui.visuals().text_color().gamma_multiply(0.7) })
+            )
+            .fill(if git_active { ui.visuals().selection.bg_fill.gamma_multiply(0.6) } else { Color32::TRANSPARENT })
+            .corner_radius(egui::CornerRadius::same(4));
+
+            if ui.add(git_btn).clicked() {
+                self.sidebar_tab = SidebarTab::Git;
+                self.git.refresh(Some(&root));
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("⟳").on_hover_text("Refresh").clicked() {
                     self.dir_cache.clear();
@@ -1227,6 +1493,11 @@ impl Editor {
         ui.add_space(3.0);
         ui.separator();
         ui.add_space(3.0);
+
+        if self.sidebar_tab == SidebarTab::Git {
+            self.git_sidebar_panel(ui, &root);
+            return;
+        }
 
         let active_path: HashSet<PathBuf> = self.tabs.get(self.active).and_then(|t| t.path.clone()).into_iter().collect();
         let mut to_open = None;
@@ -1256,8 +1527,469 @@ impl Editor {
         }
     }
 
+    fn open_diff_tab(&mut self, path: &Path, rel_path: &str) {
+        if let Some(root) = &self.root {
+            let lines = git::get_file_diff(root, rel_path);
+            if let Some(pos) = self.tabs.iter().position(|t| {
+                if let View::Diff(diff) = &t.view {
+                    diff.rel_path == rel_path
+                } else {
+                    false
+                }
+            }) {
+                if let View::Diff(diff) = &mut self.tabs[pos].view {
+                    diff.lines = lines;
+                }
+                self.active = pos;
+                return;
+            }
+
+            let mut tab = Tab::untitled();
+            tab.path = Some(path.to_path_buf());
+            tab.read_only = true;
+            tab.syntax = "Diff".into();
+            tab.view = View::Diff(DiffView {
+                file_path: path.to_path_buf(),
+                rel_path: rel_path.to_string(),
+                lines,
+            });
+            self.tabs.push(tab);
+            self.active = self.tabs.len() - 1;
+        }
+    }
+
+    fn open_branch_switcher(&mut self) {
+        if let Some(root) = &self.root {
+            if let Ok((branches, current)) = git::list_branches(root) {
+                self.cached_branches = branches;
+                self.git.branch = Some(current);
+            }
+        }
+        self.branch_switcher_open = true;
+        self.branch_search.clear();
+        self.branch_selected = 0;
+        self.show_new_branch_dialog = false;
+        self.new_branch_input.clear();
+    }
+
+    fn branch_switcher_modal(&mut self, ctx: &egui::Context) {
+        if !self.branch_switcher_open {
+            return;
+        }
+
+        let mut close = false;
+        let mut switch_to = None;
+        let mut create_and_switch = None;
+
+        egui::Window::new("Switch Git Branch (⌘⇧B)")
+            .id(egui::Id::unique("branch_switcher_window"))
+            .collapsible(false)
+            .resizable(false)
+            .fixed_pos(ctx.input(|i| {
+                let size = i.viewport().inner_rect.map(|r| r.size()).unwrap_or(egui::Vec2::new(1000.0, 700.0));
+                egui::pos2((size.x - 480.0) / 2.0, 75.0)
+            }))
+            .fixed_size([480.0, 340.0])
+            .show(ctx, |ui| {
+                if self.show_new_branch_dialog {
+                    ui.label(RichText::new("Create and Checkout New Branch:").strong());
+                    ui.add_space(6.0);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.new_branch_input)
+                            .hint_text("new-branch-name")
+                            .desired_width(450.0),
+                    );
+                    r.request_focus();
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let can_create = !self.new_branch_input.trim().is_empty();
+                        if ui.add_enabled(can_create, egui::Button::new("Create & Switch")).clicked()
+                            || (can_create && ui.input(|i| i.key_pressed(Key::Enter)))
+                        {
+                            create_and_switch = Some(self.new_branch_input.trim().to_string());
+                        }
+                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                            self.show_new_branch_dialog = false;
+                        }
+                    });
+                    return;
+                }
+
+                // Branch filter input
+                ui.horizontal(|ui| {
+                    ui.label("");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.branch_search)
+                            .hint_text("Filter branches or press + for new…")
+                            .desired_width(380.0),
+                    );
+                    r.request_focus();
+
+                    if ui.button("+ New").on_hover_text("Create new branch").clicked() {
+                        self.show_new_branch_dialog = true;
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                let filter = self.branch_search.trim().to_lowercase();
+                let filtered: Vec<&String> = self
+                    .cached_branches
+                    .iter()
+                    .filter(|b| filter.is_empty() || b.to_lowercase().contains(&filter))
+                    .collect();
+
+                let cur_branch = self.git.branch.as_deref().unwrap_or("");
+
+                // Arrow navigation
+                if ui.input(|i| i.key_pressed(Key::ArrowDown)) && !filtered.is_empty() {
+                    self.branch_selected = (self.branch_selected + 1).min(filtered.len() - 1);
+                }
+                if ui.input(|i| i.key_pressed(Key::ArrowUp)) && self.branch_selected > 0 {
+                    self.branch_selected -= 1;
+                }
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    if let Some(target) = filtered.get(self.branch_selected) {
+                        switch_to = Some((*target).clone());
+                    }
+                }
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    close = true;
+                }
+
+                egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                    if filtered.is_empty() {
+                        ui.label(RichText::new("No matching branches").italics().color(Color32::GRAY));
+                    } else {
+                        for (i, branch_name) in filtered.iter().enumerate() {
+                            let is_current = branch_name.as_str() == cur_branch;
+                            let is_selected = i == self.branch_selected;
+
+                            let mut text = RichText::new(format!("  {} {}", if is_current { "✓" } else { " " }, branch_name));
+                            if is_current {
+                                text = text.strong().color(Color32::from_rgb(97, 175, 239));
+                            } else if is_selected {
+                                text = text.strong().color(ui.visuals().strong_text_color());
+                            }
+
+                            let bg = if is_selected {
+                                ui.visuals().selection.bg_fill.gamma_multiply(0.7)
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+
+                            let frame = egui::Frame::NONE
+                                .fill(bg)
+                                .corner_radius(egui::CornerRadius::same(3))
+                                .inner_margin(egui::Margin::symmetric(6, 4));
+
+                            let res = frame.show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(text);
+                                    if branch_name.starts_with("origin/") {
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.label(RichText::new("remote").small().color(Color32::GRAY));
+                                        });
+                                    }
+                                });
+                            });
+
+                            if res.response.interact(egui::Sense::click()).clicked() {
+                                switch_to = Some((*branch_name).clone());
+                            }
+                        }
+                    }
+                });
+            });
+
+        if let Some(new_b) = create_and_switch {
+            if let Some(root) = &self.root {
+                match git::create_and_checkout_branch(root, &new_b) {
+                    Ok(msg) => {
+                        self.status = msg;
+                        self.git.refresh(Some(root));
+                        self.dir_cache.clear();
+                    }
+                    Err(e) => self.status = format!("Failed to create branch: {e}"),
+                }
+            }
+            self.branch_switcher_open = false;
+        } else if let Some(target) = switch_to {
+            if let Some(root) = &self.root {
+                match git::checkout_branch(root, &target) {
+                    Ok(msg) => {
+                        self.status = msg;
+                        self.git.refresh(Some(root));
+                        self.dir_cache.clear();
+                    }
+                    Err(e) => self.status = format!("Failed to switch branch: {e}"),
+                }
+            }
+            self.branch_switcher_open = false;
+        } else if close {
+            self.branch_switcher_open = false;
+        }
+    }
+
+    fn git_sidebar_panel(&mut self, ui: &mut egui::Ui, root: &Path) {
+        let mut to_stage = None;
+        let mut to_unstage = None;
+        let mut to_discard = None;
+        let mut to_diff = None;
+        let mut to_open = None;
+
+        let cur_branch = self.git.branch.clone().unwrap_or_else(|| "detached".into());
+
+        // Header toolbar: Branch name + Push + Pull + Refresh
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new(format!(" {cur_branch}")).strong())
+                .on_hover_text("Switch Branch (⌘⇧B)")
+                .clicked()
+            {
+                self.open_branch_switcher();
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("⟳").on_hover_text("Refresh Git status").clicked() {
+                    self.git.refresh(Some(root));
+                }
+                if ui.small_button("⬇").on_hover_text("Pull from remote").clicked() {
+                    match git::pull_from_remote(root) {
+                        Ok(msg) => {
+                            self.log_info("Git", &format!("Git pull: {msg}"));
+                            self.git.refresh(Some(root));
+                            self.dir_cache.clear();
+                        }
+                        Err(e) => self.log_error("Git", &format!("Git pull failed:\n{e}")),
+                    }
+                }
+                if ui.small_button("⬆").on_hover_text("Push to remote").clicked() {
+                    match git::push_to_remote(root) {
+                        Ok(msg) => self.log_info("Git", &format!("Git push: {msg}")),
+                        Err(e) => self.log_error("Git", &format!("Git push failed:\n{e}")),
+                    }
+                }
+            });
+        });
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // Commit Box
+        let commit_edit = ui.add(
+            egui::TextEdit::multiline(&mut self.git_commit_msg)
+                .hint_text("Commit message (⌘Enter to commit)…")
+                .desired_rows(2)
+                .desired_width(ui.available_width()),
+        );
+
+        let can_commit = !self.git.staged.is_empty() && !self.git_commit_msg.trim().is_empty();
+        let commit_label = if self.git.staged.is_empty() {
+            "✓ Commit (0 staged)".to_string()
+        } else {
+            format!("✓ Commit ({} staged)", self.git.staged.len())
+        };
+
+        let commit_btn = ui.add_enabled(
+            can_commit,
+            egui::Button::new(RichText::new(commit_label).strong()).min_size(egui::vec2(ui.available_width(), 22.0)),
+        );
+
+        let trigger_commit = commit_btn.clicked()
+            || (commit_edit.has_focus() && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter)));
+
+        if trigger_commit && can_commit {
+            match git::commit_staged(root, &self.git_commit_msg) {
+                Ok(msg) => {
+                    self.log_info("Git", &format!("Committed: {msg}"));
+                    self.git_commit_msg.clear();
+                    self.git.refresh(Some(root));
+                }
+                Err(e) => self.log_error("Git", &format!("Commit failed:\n{e}")),
+            }
+        }
+
+        if self.git.staged.is_empty() && !self.git.unstaged.is_empty() {
+            ui.add_space(2.0);
+            if ui.small_button("➕ Stage all changes").clicked() {
+                let _ = git::stage_all(root);
+                self.git.refresh(Some(root));
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+
+        // Scrollable lists of staged & unstaged
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            // 1. STAGED CHANGES
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("STAGED CHANGES ({})", self.git.staged.len()))
+                        .size(11.0)
+                        .strong()
+                        .color(Color32::from_rgb(130, 140, 155)),
+                );
+                if !self.git.staged.is_empty() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("➖ All").on_hover_text("Unstage all files").clicked() {
+                            let _ = git::unstage_all(root);
+                            self.git.refresh(Some(root));
+                        }
+                    });
+                }
+            });
+
+            if self.git.staged.is_empty() {
+                ui.label(RichText::new("  No staged changes").small().italics().color(Color32::GRAY));
+            } else {
+                for item in &self.git.staged {
+                    let rel = item.rel_path.clone();
+                    let path = item.path.clone();
+                    let (badge, badge_color) = match item.status {
+                        FileGitStatus::Modified => ("M", Color32::from_rgb(209, 154, 102)),
+                        FileGitStatus::Untracked => ("U", Color32::from_rgb(152, 195, 121)),
+                        FileGitStatus::Staged => ("A", Color32::from_rgb(97, 175, 239)),
+                        FileGitStatus::Deleted => ("D", Color32::from_rgb(224, 108, 117)),
+                        FileGitStatus::Renamed => ("R", Color32::from_rgb(152, 195, 121)),
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(RichText::new(badge).small().strong().color(badge_color));
+
+                        let fname = Path::new(&rel).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| rel.clone());
+                        let name_btn = ui.add(egui::Label::new(RichText::new(fname).small()).sense(egui::Sense::click()))
+                            .on_hover_text(&rel);
+                        if name_btn.clicked() {
+                            to_open = Some(path.clone());
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("➖").on_hover_text("Unstage file").clicked() {
+                                to_unstage = Some(rel.clone());
+                            }
+                            if ui.small_button("🔍").on_hover_text("Open diff view").clicked() {
+                                to_diff = Some((path.clone(), rel.clone()));
+                            }
+                        });
+                    });
+                }
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+
+            // 2. CHANGES (UNSTAGED)
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("CHANGES ({})", self.git.unstaged.len()))
+                        .size(11.0)
+                        .strong()
+                        .color(Color32::from_rgb(130, 140, 155)),
+                );
+                if !self.git.unstaged.is_empty() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("➕ All").on_hover_text("Stage all files").clicked() {
+                            let _ = git::stage_all(root);
+                            self.git.refresh(Some(root));
+                        }
+                    });
+                }
+            });
+
+            if self.git.unstaged.is_empty() {
+                ui.label(RichText::new("  Working tree clean").small().italics().color(Color32::GRAY));
+            } else {
+                for item in &self.git.unstaged {
+                    let rel = item.rel_path.clone();
+                    let path = item.path.clone();
+                    let is_untracked = item.status == FileGitStatus::Untracked;
+                    let (badge, badge_color) = match item.status {
+                        FileGitStatus::Modified => ("M", Color32::from_rgb(209, 154, 102)),
+                        FileGitStatus::Untracked => ("U", Color32::from_rgb(152, 195, 121)),
+                        FileGitStatus::Staged => ("A", Color32::from_rgb(97, 175, 239)),
+                        FileGitStatus::Deleted => ("D", Color32::from_rgb(224, 108, 117)),
+                        FileGitStatus::Renamed => ("R", Color32::from_rgb(152, 195, 121)),
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(RichText::new(badge).small().strong().color(badge_color));
+
+                        let fname = Path::new(&rel).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| rel.clone());
+                        let name_btn = ui.add(egui::Label::new(RichText::new(fname).small()).sense(egui::Sense::click()))
+                            .on_hover_text(&rel);
+                        if name_btn.clicked() {
+                            to_open = Some(path.clone());
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("➕").on_hover_text("Stage file").clicked() {
+                                to_stage = Some(rel.clone());
+                            }
+                            if ui.small_button("⟲").on_hover_text("Discard changes").clicked() {
+                                to_discard = Some((rel.clone(), is_untracked));
+                            }
+                            if !is_untracked {
+                                if ui.small_button("🔍").on_hover_text("Open diff view").clicked() {
+                                    to_diff = Some((path.clone(), rel.clone()));
+                                }
+                            }
+                        });
+                    });
+                }
+            }
+        });
+
+        if let Some(r) = to_stage {
+            let _ = git::stage_file(root, &r);
+            self.git.refresh(Some(root));
+        }
+        if let Some(r) = to_unstage {
+            let _ = git::unstage_file(root, &r);
+            self.git.refresh(Some(root));
+        }
+        if let Some((r, is_untracked)) = to_discard {
+            let _ = git::discard_file_changes(root, &r, is_untracked);
+            self.git.refresh(Some(root));
+            self.dir_cache.clear();
+        }
+        if let Some((p, rel)) = to_diff {
+            self.open_diff_tab(&p, &rel);
+        }
+        if let Some(p) = to_open {
+            self.open_file(&p);
+        }
+    }
+
     fn main_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            #[cfg(target_os = "macos")]
+            {
+                let is_fullscreen = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                if !is_fullscreen {
+                    let (_rect, drag_resp) = ui.allocate_exact_size(
+                        egui::vec2(76.0, ui.available_height()),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if drag_resp.drag_started_by(egui::PointerButton::Primary) {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    if drag_resp.double_clicked() {
+                        let is_maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                    }
+                }
+            }
+
             ui.spacing_mut().item_spacing.x = 4.0;
 
             if ui.button("⚡ Commands").on_hover_text("Command Palette (⌘⇧P)").clicked() {
@@ -1315,6 +2047,24 @@ impl Editor {
             let sidebar_label = if self.show_sidebar { "◧ Sidebar" } else { "◨ Sidebar" };
             if ui.button(sidebar_label).on_hover_text("Toggle File Tree Sidebar (⌘B)").clicked() {
                 self.show_sidebar = !self.show_sidebar;
+            }
+
+            // Draggable background area between toolbar buttons and Settings
+            let right_width = 90.0;
+            let available = ui.available_width();
+            if available > right_width {
+                let drag_width = available - right_width;
+                let (_drag_rect, drag_resp) = ui.allocate_exact_size(
+                    egui::vec2(drag_width, ui.available_height()),
+                    egui::Sense::click_and_drag(),
+                );
+                if drag_resp.drag_started_by(egui::PointerButton::Primary) {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                if drag_resp.double_clicked() {
+                    let is_maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                }
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1588,6 +2338,7 @@ impl Editor {
         match &mut tab.view {
             View::Image(v) => return v.ui(ui),
             View::Pdf(v) => return v.ui(ui),
+            View::Diff(_) => return self.render_diff_view(ui, tab_idx),
             View::Text => {}
         }
 
@@ -1640,6 +2391,158 @@ impl Editor {
         });
     }
 
+    fn render_diff_view(&mut self, ui: &mut egui::Ui, tab_idx: usize) {
+        let (rel_path, file_path, lines) = match &self.tabs[tab_idx].view {
+            View::Diff(d) => (d.rel_path.clone(), d.file_path.clone(), d.lines.clone()),
+            _ => return,
+        };
+
+        let adds = lines.iter().filter(|l| l.line_type == git::DiffLineType::Added).count();
+        let dels = lines.iter().filter(|l| l.line_type == git::DiffLineType::Deleted).count();
+
+        let mut to_open_file = false;
+        let mut do_unstage = false;
+        let mut do_stage = false;
+        let mut do_refresh = false;
+
+        // Top toolbar
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(RichText::new("🌿 Working Tree vs HEAD:").strong());
+            ui.label(RichText::new(&rel_path).monospace().strong());
+            ui.colored_label(Color32::from_rgb(152, 195, 121), format!("+{adds}"));
+            ui.colored_label(Color32::from_rgb(224, 108, 117), format!("-{dels}"));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.root.is_some() {
+                    let is_staged = self.git.staged.iter().any(|c| c.rel_path == rel_path);
+                    if is_staged {
+                        if ui.button("➖ Unstage").clicked() {
+                            do_unstage = true;
+                        }
+                    } else {
+                        if ui.button("➕ Stage").clicked() {
+                            do_stage = true;
+                        }
+                    }
+
+                    if ui.button("📄 Open File").clicked() {
+                        to_open_file = true;
+                    }
+                    if ui.button("⟳ Refresh Diff").clicked() {
+                        do_refresh = true;
+                    }
+                }
+            });
+        });
+
+        if let Some(root) = self.root.clone() {
+            if do_unstage {
+                let _ = git::unstage_file(&root, &rel_path);
+                self.git.refresh(Some(&root));
+                if let View::Diff(d) = &mut self.tabs[tab_idx].view {
+                    d.lines = git::get_file_diff(&root, &rel_path);
+                }
+            } else if do_stage {
+                let _ = git::stage_file(&root, &rel_path);
+                self.git.refresh(Some(&root));
+                if let View::Diff(d) = &mut self.tabs[tab_idx].view {
+                    d.lines = git::get_file_diff(&root, &rel_path);
+                }
+            } else if do_refresh {
+                if let View::Diff(d) = &mut self.tabs[tab_idx].view {
+                    d.lines = git::get_file_diff(&root, &rel_path);
+                }
+            }
+        }
+
+        if to_open_file {
+            self.open_file(&file_path);
+        }
+
+        ui.separator();
+
+        if lines.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(30.0);
+                ui.label(RichText::new("No differences found between working copy and HEAD.").italics().color(Color32::GRAY));
+            });
+            return;
+        }
+
+        let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+        let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 3.0;
+
+        egui::ScrollArea::both().id_salt(("diff_view", tab_idx)).auto_shrink(false).show_rows(
+            ui,
+            row_h,
+            lines.len(),
+            |ui, row_range| {
+                for i in row_range {
+                    let line = &lines[i];
+                    let (bg, text_color, prefix) = match line.line_type {
+                        git::DiffLineType::Added => (
+                            Color32::from_rgba_unmultiplied(46, 160, 67, 45),
+                            Color32::from_rgb(152, 195, 121),
+                            "+ ",
+                        ),
+                        git::DiffLineType::Deleted => (
+                            Color32::from_rgba_unmultiplied(248, 81, 73, 45),
+                            Color32::from_rgb(224, 108, 117),
+                            "- ",
+                        ),
+                        git::DiffLineType::Header => (
+                            Color32::from_rgba_unmultiplied(97, 175, 239, 30),
+                            Color32::from_rgb(97, 175, 239),
+                            "  ",
+                        ),
+                        git::DiffLineType::Context => (
+                            Color32::TRANSPARENT,
+                            ui.visuals().text_color(),
+                            "  ",
+                        ),
+                    };
+
+                    let line_rect = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width().max(800.0), row_h),
+                    );
+                    if bg != Color32::TRANSPARENT {
+                        ui.painter().rect_filled(line_rect, 0.0, bg);
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+
+                        // Old line number column
+                        let old_str = line.old_line_num.map(|n| n.to_string()).unwrap_or_default();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(40.0, row_h),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(RichText::new(old_str).font(font_id.clone()).color(Color32::from_rgb(92, 99, 112)));
+                            },
+                        );
+
+                        // New line number column
+                        let new_str = line.new_line_num.map(|n| n.to_string()).unwrap_or_default();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(40.0, row_h),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(RichText::new(new_str).font(font_id.clone()).color(Color32::from_rgb(92, 99, 112)));
+                            },
+                        );
+
+                        // Code text
+                        let full_line = format!("{}{}", prefix, line.text);
+                        ui.label(RichText::new(full_line).font(font_id.clone()).color(text_color));
+                    });
+                }
+            },
+        );
+    }
+
     fn render_text_editor(&mut self, ui: &mut egui::Ui, tab_idx: usize) {
         if tab_idx >= self.tabs.len() {
             return;
@@ -1658,6 +2561,21 @@ impl Editor {
         tab.recalculate_line_numbers();
         let line_count = tab.cached_line_count;
         let line_numbers_str = tab.cached_line_numbers.clone();
+
+        // Refresh gutter diff changes if interval elapsed
+        let should_check_gutter = tab.last_gutter_check.map_or(true, |t| t.elapsed() > std::time::Duration::from_millis(1500));
+        if should_check_gutter {
+            tab.last_gutter_check = Some(std::time::Instant::now());
+            if let (Some(root), Some(path)) = (&self.root, &tab.path) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    tab.gutter_changes = git::compute_gutter_changes(root, &rel.to_string_lossy());
+                } else {
+                    tab.gutter_changes.clear();
+                }
+            } else {
+                tab.gutter_changes.clear();
+            }
+        }
 
         // Optimized layouter: on huge files (> 1MB), use plain text highlighting for silky smooth typing
         let is_huge_file = tab.text.len() > 1024 * 1024;
@@ -1685,10 +2603,13 @@ impl Editor {
             ui.fonts_mut(|f| f.layout_job(job))
         };
 
+        let mut clicked_fold_line = None;
+
         let output = egui::ScrollArea::both().id_salt(id).auto_shrink(false).show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 if show_line_nums {
-                    ui.add(
+                    let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+                    let line_nums_resp = ui.add(
                         egui::Label::new(
                             RichText::new(line_numbers_str.trim_end())
                                 .monospace()
@@ -1696,6 +2617,92 @@ impl Editor {
                         )
                         .selectable(false),
                     );
+
+                    // Code folding column in gutter
+                    if self.settings.code_folding && !tab.fold_ranges.is_empty() {
+                        let gutter_w = 12.0;
+                        let (gutter_resp, painter) = ui.allocate_painter(
+                            egui::vec2(gutter_w, line_nums_resp.rect.height()),
+                            egui::Sense::click(),
+                        );
+
+                        let active_lines: std::collections::HashSet<usize> =
+                            tab.active_folds.iter().map(|f| f.start_line).collect();
+
+                        let hovered_pos = gutter_resp.hover_pos();
+                        let hovered_line = hovered_pos.map(|p| {
+                            ((p.y - gutter_resp.rect.min.y) / row_h).floor() as usize + 1
+                        });
+
+                        for range in &tab.fold_ranges {
+                            let line = range.start_line;
+                            if line > line_count {
+                                continue;
+                            }
+                            let y = gutter_resp.rect.min.y + (line - 1) as f32 * row_h + row_h * 0.5;
+                            let center = egui::pos2(gutter_resp.rect.center().x, y);
+
+                            let is_folded = active_lines.contains(&line);
+                            let is_hovered = hovered_line == Some(line);
+
+                            if is_folded {
+                                painter.text(
+                                    center,
+                                    egui::Align2::CENTER_CENTER,
+                                    "▶",
+                                    egui::FontId::monospace(9.0),
+                                    Color32::from_rgb(97, 175, 239),
+                                );
+                            } else if is_hovered || gutter_resp.hovered() {
+                                painter.text(
+                                    center,
+                                    egui::Align2::CENTER_CENTER,
+                                    "▼",
+                                    egui::FontId::monospace(9.0),
+                                    if is_hovered {
+                                        Color32::from_rgb(229, 192, 123)
+                                    } else {
+                                        Color32::from_rgb(92, 99, 112)
+                                    },
+                                );
+                            }
+                        }
+
+                        if gutter_resp.clicked() {
+                            clicked_fold_line = hovered_line;
+                        }
+                    }
+
+                    // Git diff gutter indicator bar
+                    if !tab.gutter_changes.is_empty() {
+                        let diff_w = 3.0;
+                        let (diff_resp, diff_painter) = ui.allocate_painter(
+                            egui::vec2(diff_w + 3.0, line_nums_resp.rect.height()),
+                            egui::Sense::hover(),
+                        );
+
+                        for change in &tab.gutter_changes {
+                            let start_line = change.line_start;
+                            if start_line > line_count {
+                                continue;
+                            }
+                            let y = diff_resp.rect.min.y + (start_line.saturating_sub(1)) as f32 * row_h;
+                            let count = change.line_count.max(1);
+                            let bar_h = ((count as f32) * row_h).min(diff_resp.rect.max.y - y);
+                            let bar_rect = egui::Rect::from_min_size(
+                                egui::pos2(diff_resp.rect.min.x + 1.0, y),
+                                egui::vec2(diff_w, bar_h.max(2.0)),
+                            );
+
+                            let color = match change.change_type {
+                                git::GutterChangeType::Added => Color32::from_rgb(152, 195, 121),
+                                git::GutterChangeType::Modified => Color32::from_rgb(229, 192, 123),
+                                git::GutterChangeType::Deleted => Color32::from_rgb(224, 108, 117),
+                            };
+                            diff_painter.rect_filled(bar_rect, egui::CornerRadius::same(1), color);
+                        }
+                    }
+
                     ui.add_space(6.0);
                 }
 
@@ -1715,7 +2722,28 @@ impl Editor {
 
         let mut out = output.inner;
 
+        if let Some(target_line) = clicked_fold_line {
+            let is_folded = tab.active_folds.iter().any(|f| f.start_line == target_line);
+            if is_folded {
+                if let Some(pos) = tab.active_folds.iter().position(|f| f.start_line == target_line) {
+                    let fold = tab.active_folds.remove(pos);
+                    tab.text = folding::unfold_block(&tab.text, &fold);
+                    tab.recalculate_line_numbers();
+                    self.status = format!("Unfolded block at line {target_line}");
+                }
+            } else if let Some(range) = tab.fold_ranges.iter().find(|r| r.start_line == target_line).cloned() {
+                if let Some((new_text, active_fold)) = folding::fold_block(&tab.text, &range) {
+                    tab.text = new_text;
+                    tab.active_folds.push(active_fold);
+                    tab.recalculate_line_numbers();
+                    self.status = format!("Folded block at line {target_line}");
+                }
+            }
+        }
+
         if out.response.clicked() || out.response.gained_focus() {
+            self.terminal.focused = false;
+            ui.ctx().memory_mut(|m| m.request_focus(id));
             if !is_active {
                 self.active = tab_idx;
             }
@@ -1778,7 +2806,7 @@ impl Editor {
         let tab = &self.tabs[self.active];
         let read_only = tab.read_only && matches!(tab.view, View::Text);
         let media_info = match &tab.view {
-            View::Text => None,
+            View::Text | View::Diff(_) => None,
             View::Image(v) => Some(v.info()),
             View::Pdf(v) => Some(v.info()),
         };
@@ -1800,8 +2828,14 @@ impl Editor {
                 } else {
                     Color32::from_rgb(97, 175, 239)
                 };
-                ui.label(RichText::new(branch_text).small().strong().color(branch_color))
-                    .on_hover_text(if has_changes { "Git branch (modified files)" } else { "Git branch (clean working tree)" });
+                let branch_btn = ui.add(
+                    egui::Label::new(RichText::new(branch_text).small().strong().color(branch_color))
+                        .sense(egui::Sense::click()),
+                ).on_hover_text(if has_changes { "Git branch (modified files) — click to switch (⌘⇧B)" } else { "Git branch (clean) — click to switch (⌘⇧B)" });
+
+                if branch_btn.clicked() {
+                    self.open_branch_switcher();
+                }
                 ui.label(sep.clone());
             }
 
@@ -1826,20 +2860,55 @@ impl Editor {
 
             if !self.status.is_empty() {
                 ui.label(sep.clone());
-                ui.label(RichText::new(&self.status).small().color(Color32::from_rgb(229, 192, 123)));
+                let first_line = self.status.lines().next().unwrap_or("").trim();
+                let short_status = if first_line.chars().count() > 65 {
+                    format!("{}…", first_line.chars().take(65).collect::<String>())
+                } else {
+                    first_line.to_string()
+                };
+
+                let has_err = self.logs.last().map_or(false, |l| l.level == LogLevel::Error);
+                let status_color = if has_err {
+                    Color32::from_rgb(224, 108, 117)
+                } else {
+                    Color32::from_rgb(229, 192, 123)
+                };
+
+                let status_resp = ui.add(
+                    egui::Label::new(RichText::new(&short_status).small().color(status_color))
+                        .sense(egui::Sense::click()),
+                ).on_hover_text(format!("{}\n\n(Click to view full logs/errors in bottom panel)", self.status));
+
+                if status_resp.clicked() {
+                    self.terminal.open = true;
+                    self.bottom_panel_tab = if has_err { BottomPanelTab::Errors } else { BottomPanelTab::Logs };
+                }
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
 
+                let err_count = self.logs.iter().filter(|l| l.level == LogLevel::Error).count();
+                if err_count > 0 {
+                    let err_btn = ui.add(
+                        egui::Button::new(RichText::new(format!("⚠ {err_count}")).small().strong().color(Color32::from_rgb(224, 108, 117)))
+                            .frame(false)
+                    ).on_hover_text(format!("{err_count} error(s) — click to open Errors panel"));
+                    if err_btn.clicked() {
+                        self.terminal.open = true;
+                        self.bottom_panel_tab = BottomPanelTab::Errors;
+                    }
+                    ui.label(sep.clone());
+                }
+
                 let term_text = if self.terminal.is_running() {
                     RichText::new("💻 Running task…").small().color(Color32::from_rgb(97, 175, 239))
                 } else if self.terminal.open {
-                    RichText::new("💻 Terminal: ON").small().color(Color32::from_rgb(152, 195, 121))
+                    RichText::new("💻 Panel: ON").small().color(Color32::from_rgb(152, 195, 121))
                 } else {
-                    RichText::new("💻 Terminal").small()
+                    RichText::new("💻 Panel").small()
                 };
-                if ui.selectable_label(self.terminal.open, term_text).on_hover_text("Toggle Terminal & Tasks Drawer (⌃`)").clicked() {
+                if ui.selectable_label(self.terminal.open, term_text).on_hover_text("Toggle Terminal, Logs & Errors (⌃`)").clicked() {
                     self.terminal.toggle(self.root.as_deref());
                 }
                 ui.label(sep.clone());
@@ -1910,48 +2979,231 @@ impl Editor {
     fn terminal_drawer_ui(&mut self, ui: &mut egui::Ui) {
         let root = self.root.clone();
 
-        // 1. Top bar of terminal drawer
+        let err_count = self.logs.iter().filter(|l| l.level == LogLevel::Error).count();
+        let log_count = self.logs.len();
+
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(RichText::new("💻 TERMINAL").size(11.0).strong().color(Color32::from_rgb(130, 140, 155)));
+            ui.spacing_mut().item_spacing.x = 4.0;
 
-            ui.separator();
-
-            // Project tasks quick buttons (e.g. npm run dev, cargo check, etc.)
-            if self.project_tasks.is_empty() {
-                ui.label(RichText::new("No package.json / cargo scripts detected").small().color(Color32::GRAY));
-            } else {
-                egui::ScrollArea::horizontal().max_height(24.0).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for task in self.project_tasks.iter().take(8) {
-                            let btn = egui::Button::new(RichText::new(format!("▶ {}", task.name)).small());
-                            if ui.add(btn).on_hover_text(format!("Execute '{}' in native terminal", task.command)).clicked() {
-                                self.terminal.run_command(&task.command, root.as_deref());
-                            }
-                        }
-                    });
-                });
+            // Tab 1: Terminal
+            let term_active = self.bottom_panel_tab == BottomPanelTab::Terminal;
+            let term_btn = egui::Button::new(
+                RichText::new("💻 Terminal")
+                    .size(11.0)
+                    .strong()
+                    .color(if term_active { ui.visuals().strong_text_color() } else { ui.visuals().text_color().gamma_multiply(0.7) })
+            )
+            .fill(if term_active { ui.visuals().selection.bg_fill.gamma_multiply(0.6) } else { Color32::TRANSPARENT })
+            .corner_radius(egui::CornerRadius::same(4));
+            if ui.add(term_btn).clicked() {
+                self.bottom_panel_tab = BottomPanelTab::Terminal;
             }
 
+            // Tab 2: Logs
+            let logs_active = self.bottom_panel_tab == BottomPanelTab::Logs;
+            let logs_label = if log_count > 0 {
+                format!("📋 Logs ({log_count})")
+            } else {
+                "📋 Logs".to_string()
+            };
+            let logs_btn = egui::Button::new(
+                RichText::new(logs_label)
+                    .size(11.0)
+                    .strong()
+                    .color(if logs_active { ui.visuals().strong_text_color() } else { ui.visuals().text_color().gamma_multiply(0.7) })
+            )
+            .fill(if logs_active { ui.visuals().selection.bg_fill.gamma_multiply(0.6) } else { Color32::TRANSPARENT })
+            .corner_radius(egui::CornerRadius::same(4));
+            if ui.add(logs_btn).clicked() {
+                self.bottom_panel_tab = BottomPanelTab::Logs;
+            }
+
+            // Tab 3: Errors
+            let errs_active = self.bottom_panel_tab == BottomPanelTab::Errors;
+            let errs_label = if err_count > 0 {
+                format!("⚠ Errors ({err_count})")
+            } else {
+                "⚠ Errors".to_string()
+            };
+            let err_color = if err_count > 0 {
+                Color32::from_rgb(224, 108, 117)
+            } else if errs_active {
+                ui.visuals().strong_text_color()
+            } else {
+                ui.visuals().text_color().gamma_multiply(0.7)
+            };
+            let errs_btn = egui::Button::new(
+                RichText::new(errs_label)
+                    .size(11.0)
+                    .strong()
+                    .color(err_color)
+            )
+            .fill(if errs_active { ui.visuals().selection.bg_fill.gamma_multiply(0.6) } else { Color32::TRANSPARENT })
+            .corner_radius(egui::CornerRadius::same(4));
+            if ui.add(errs_btn).clicked() {
+                self.bottom_panel_tab = BottomPanelTab::Errors;
+            }
+
+            // Tab 4: Tasks
+            let tasks_active = self.bottom_panel_tab == BottomPanelTab::Tasks;
+            let tasks_btn = egui::Button::new(
+                RichText::new(format!("⚡ Tasks ({})", self.project_tasks.len()))
+                    .size(11.0)
+                    .strong()
+                    .color(if tasks_active { ui.visuals().strong_text_color() } else { ui.visuals().text_color().gamma_multiply(0.7) })
+            )
+            .fill(if tasks_active { ui.visuals().selection.bg_fill.gamma_multiply(0.6) } else { Color32::TRANSPARENT })
+            .corner_radius(egui::CornerRadius::same(4));
+            if ui.add(tasks_btn).clicked() {
+                self.bottom_panel_tab = BottomPanelTab::Tasks;
+            }
+
+            // Right-side actions based on active tab
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").on_hover_text("Close Terminal (⌃`)").clicked() {
+                if ui.small_button("×").on_hover_text("Close Panel (⌃`)").clicked() {
                     self.terminal.open = false;
                 }
-                if ui.small_button("🧹 Clear").on_hover_text("Clear terminal screen (Ctrl+L)").clicked() {
-                    self.terminal.clear();
-                }
-                if ui.small_button("⟳ Reset").on_hover_text("Restart interactive shell").clicked() {
-                    self.terminal.restart_shell(root.as_deref());
+
+                match self.bottom_panel_tab {
+                    BottomPanelTab::Terminal => {
+                        if ui.small_button("🧹 Clear").on_hover_text("Clear terminal screen (Ctrl+L)").clicked() {
+                            self.terminal.clear();
+                        }
+                        if ui.small_button("⟳ Reset").on_hover_text("Restart interactive shell").clicked() {
+                            self.terminal.restart_shell(root.as_deref());
+                        }
+                    }
+                    BottomPanelTab::Logs => {
+                        if ui.small_button("🧹 Clear Logs").clicked() {
+                            self.logs.clear();
+                        }
+                        if ui.small_button("📋 Copy All").clicked() {
+                            let text: String = self.logs.iter().map(|l| format!("[{}] [{}] [{:?}] {}", l.time, l.source, l.level, l.message)).collect::<Vec<_>>().join("\n");
+                            ui.ctx().copy_text(text);
+                            self.status = "Copied logs to clipboard".into();
+                        }
+                    }
+                    BottomPanelTab::Errors => {
+                        if ui.small_button("🧹 Clear Errors").clicked() {
+                            self.logs.retain(|l| l.level != LogLevel::Error);
+                        }
+                        if ui.small_button("📋 Copy All").clicked() {
+                            let text: String = self.logs.iter().filter(|l| l.level == LogLevel::Error).map(|l| format!("[{}] [{}] {}", l.time, l.source, l.message)).collect::<Vec<_>>().join("\n\n");
+                            ui.ctx().copy_text(text);
+                            self.status = "Copied errors to clipboard".into();
+                        }
+                    }
+                    BottomPanelTab::Tasks => {}
                 }
             });
         });
 
-        ui.add_space(2.0);
+        ui.add_space(3.0);
         ui.separator();
-        ui.add_space(2.0);
+        ui.add_space(3.0);
 
-        // 2. Native Interactive Terminal Canvas
-        render_native_terminal(ui, &mut self.terminal, root.as_deref());
+        // Body of selected tab
+        match self.bottom_panel_tab {
+            BottomPanelTab::Terminal => {
+                if !self.project_tasks.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Quick Run:").small().color(Color32::GRAY));
+                        for task in self.project_tasks.iter().take(6) {
+                            if ui.small_button(format!("▶ {}", task.name))
+                                .on_hover_text(format!("Run '{}' in terminal", task.command))
+                                .clicked()
+                            {
+                                self.terminal.run_command(&task.command, root.as_deref());
+                            }
+                        }
+                    });
+                    ui.add_space(2.0);
+                }
+                render_native_terminal(ui, &mut self.terminal, root.as_deref());
+            }
+            BottomPanelTab::Logs => {
+                if self.logs.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.label(RichText::new("No log entries yet.").italics().color(Color32::GRAY));
+                    });
+                } else {
+                    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                        for log in &self.logs {
+                            let (badge_color, level_str) = match log.level {
+                                LogLevel::Info => (Color32::from_rgb(97, 175, 239), "INFO"),
+                                LogLevel::Warning => (Color32::from_rgb(229, 192, 123), "WARN"),
+                                LogLevel::Error => (Color32::from_rgb(224, 108, 117), "ERROR"),
+                            };
+
+                            ui.horizontal_top(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.label(RichText::new(&log.time).small().monospace().color(Color32::GRAY));
+                                ui.label(RichText::new(format!("[{}]", level_str)).small().monospace().strong().color(badge_color));
+                                ui.label(RichText::new(format!("[{}]", log.source)).small().monospace().color(Color32::from_rgb(152, 195, 121)));
+                                ui.label(RichText::new(&log.message).small().monospace());
+                            });
+                        }
+                    });
+                }
+            }
+            BottomPanelTab::Errors => {
+                let errors: Vec<&AppLogEntry> = self.logs.iter().filter(|l| l.level == LogLevel::Error).collect();
+                if errors.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.label(RichText::new("✓ No errors reported").strong().color(Color32::from_rgb(152, 195, 121)));
+                    });
+                } else {
+                    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                        for err in errors {
+                            let frame = egui::Frame::NONE
+                                .fill(Color32::from_rgba_unmultiplied(248, 81, 73, 20))
+                                .stroke(egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(248, 81, 73, 60)))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::symmetric(10, 8));
+
+                            frame.show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("⚠ [{}]", err.source)).strong().color(Color32::from_rgb(224, 108, 117)));
+                                    ui.label(RichText::new(&err.time).small().color(Color32::GRAY));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.small_button("📋 Copy").clicked() {
+                                            ui.ctx().copy_text(err.message.clone());
+                                        }
+                                    });
+                                });
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(&err.message).small().monospace().color(Color32::from_rgb(224, 108, 117)));
+                            });
+                            ui.add_space(6.0);
+                        }
+                    });
+                }
+            }
+            BottomPanelTab::Tasks => {
+                if self.project_tasks.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.label(RichText::new("No package.json or Cargo.toml scripts detected in project").italics().color(Color32::GRAY));
+                    });
+                } else {
+                    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                        for task in &self.project_tasks {
+                            ui.horizontal(|ui| {
+                                if ui.button(format!("▶ {}", task.name)).clicked() {
+                                    self.bottom_panel_tab = BottomPanelTab::Terminal;
+                                    self.terminal.run_command(&task.command, root.as_deref());
+                                }
+                                ui.label(RichText::new(&task.command).small().monospace().color(Color32::GRAY));
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+                }
+            }
+        }
     }
 
     // ----- Modals & Palettes -----------------------------------------------
@@ -2091,6 +3343,14 @@ impl Editor {
             }
             "view.toggle_sidebar" => self.show_sidebar = !self.show_sidebar,
             "view.toggle_terminal" => self.terminal.toggle(self.root.as_deref()),
+            "view.open_logs" => {
+                self.terminal.open = true;
+                self.bottom_panel_tab = BottomPanelTab::Logs;
+            }
+            "view.open_errors" => {
+                self.terminal.open = true;
+                self.bottom_panel_tab = BottomPanelTab::Errors;
+            }
             "terminal.clear" => self.terminal.clear(),
             "view.toggle_split" => {
                 self.split_view = !self.split_view;
@@ -2106,6 +3366,14 @@ impl Editor {
                 self.settings.show_line_numbers = !self.settings.show_line_numbers;
                 self.save_session_state();
             }
+            "view.toggle_folding" => {
+                self.settings.code_folding = !self.settings.code_folding;
+                self.save_session_state();
+            }
+            "editor.fold" => self.fold_current_block(),
+            "editor.unfold" => self.unfold_current_block(),
+            "editor.fold_all" => self.fold_all(),
+            "editor.unfold_all" => self.unfold_all(),
             "theme.onedark" => {
                 self.settings.theme = ThemeName::OneDark;
                 apply_theme(ctx, &self.settings);
@@ -2129,6 +3397,66 @@ impl Editor {
             "syntax.autodetect" => {
                 let tab = &mut self.tabs[self.active];
                 tab.syntax = syntax::detect(tab.path.as_deref(), &tab.text);
+            }
+            "git.open_panel" => {
+                self.show_sidebar = true;
+                self.sidebar_tab = SidebarTab::Git;
+                self.git.refresh(self.root.as_deref());
+            }
+            "git.switch_branch" => self.open_branch_switcher(),
+            "git.stage_all" => {
+                if let Some(root) = &self.root {
+                    let _ = git::stage_all(root);
+                    self.git.refresh(Some(root));
+                    self.status = "Staged all changes".into();
+                }
+            }
+            "git.unstage_all" => {
+                if let Some(root) = &self.root {
+                    let _ = git::unstage_all(root);
+                    self.git.refresh(Some(root));
+                    self.status = "Unstaged all changes".into();
+                }
+            }
+            "git.commit" => {
+                if let Some(root) = self.root.clone() {
+                    if self.git.staged.is_empty() {
+                        self.status = "No staged changes to commit".into();
+                    } else if self.git_commit_msg.trim().is_empty() {
+                        self.show_sidebar = true;
+                        self.sidebar_tab = SidebarTab::Git;
+                        self.status = "Please enter a commit message".into();
+                    } else {
+                        match git::commit_staged(&root, &self.git_commit_msg) {
+                            Ok(msg) => {
+                                self.log_info("Git", &format!("Git commit: {msg}"));
+                                self.git_commit_msg.clear();
+                                self.git.refresh(Some(&root));
+                            }
+                            Err(e) => self.log_error("Git", &format!("Commit failed:\n{e}")),
+                        }
+                    }
+                }
+            }
+            "git.push" => {
+                if let Some(root) = self.root.clone() {
+                    match git::push_to_remote(&root) {
+                        Ok(msg) => self.log_info("Git", &format!("Git push: {msg}")),
+                        Err(e) => self.log_error("Git", &format!("Git push failed:\n{e}")),
+                    }
+                }
+            }
+            "git.pull" => {
+                if let Some(root) = self.root.clone() {
+                    match git::pull_from_remote(&root) {
+                        Ok(msg) => {
+                            self.log_info("Git", &format!("Git pull: {msg}"));
+                            self.git.refresh(Some(&root));
+                            self.dir_cache.clear();
+                        }
+                        Err(e) => self.log_error("Git", &format!("Git pull failed:\n{e}")),
+                    }
+                }
             }
             "preferences.open" => self.settings_open = true,
             "app.check_updates" => {
@@ -2483,6 +3811,11 @@ impl Editor {
 
                 // Show Line Numbers
                 if ui.checkbox(&mut self.settings.show_line_numbers, "Show line numbers").changed() {
+                    changed = true;
+                }
+
+                // Code Folding
+                if ui.checkbox(&mut self.settings.code_folding, "Enable Code Folding in gutter").changed() {
                     changed = true;
                 }
 
@@ -2971,8 +4304,10 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 impl eframe::App for Editor {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(target_os = "macos")]
+        frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, 36.0), 12.0);
         self.updater.poll();
 
         // Check for dropped files (drag and drop from Finder)
@@ -2999,7 +4334,7 @@ impl eframe::App for Editor {
 
         self.check_disk_modifications();
 
-        if self.pending.is_none() && !self.fuzzy.open && !self.project_search.open && !self.command_palette.open && !self.goto_line_open && self.tree_modal.is_none() {
+        if self.pending.is_none() && !self.fuzzy.open && !self.project_search.open && !self.command_palette.open && !self.goto_line_open && self.tree_modal.is_none() && !self.branch_switcher_open {
             self.shortcuts(&ctx);
         }
 
@@ -3034,6 +4369,15 @@ impl eframe::App for Editor {
             )
             .show(ui, |ui| self.status_bar(ui));
 
+        egui::Panel::top("main_toolbar")
+            .frame(
+                egui::Frame::NONE
+                    .fill(ui.visuals().panel_fill)
+                    .stroke(egui::Stroke::new(1.0, ui.visuals().window_stroke.color.gamma_multiply(0.4)))
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
+            .show(ui, |ui| self.main_toolbar(ui));
+
         if self.show_sidebar {
             egui::Panel::left("tree")
                 .resizable(true)
@@ -3050,15 +4394,6 @@ impl eframe::App for Editor {
                     self.sidebar(ui);
                 });
         }
-
-        egui::Panel::top("main_toolbar")
-            .frame(
-                egui::Frame::NONE
-                    .fill(ui.visuals().panel_fill)
-                    .stroke(egui::Stroke::new(1.0, ui.visuals().window_stroke.color.gamma_multiply(0.4)))
-                    .inner_margin(egui::Margin::symmetric(10, 5)),
-            )
-            .show(ui, |ui| self.main_toolbar(ui));
 
         egui::Panel::top("tabs")
             .frame(
@@ -3090,6 +4425,7 @@ impl eframe::App for Editor {
         self.command_palette_modal(&ctx);
         self.goto_line_modal(&ctx);
         self.project_search_modal(&ctx);
+        self.branch_switcher_modal(&ctx);
         self.settings_dialog(&ctx);
         self.about_dialog(&ctx);
         self.tree_actions_modal(&ctx);
