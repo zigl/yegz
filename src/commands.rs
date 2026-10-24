@@ -116,6 +116,7 @@ pub fn all_commands() -> Vec<EditorCommand> {
 
         // Settings & Help
         EditorCommand { id: "preferences.open", title: "Open Settings & Preferences…", category: "Preferences", shortcut: Some("⌘,"), icon: "⚙" },
+        EditorCommand { id: "app.check_updates", title: "Check for Updates…", category: "Help", shortcut: None, icon: "🔄" },
         EditorCommand { id: "help.about", title: "About Yegz…", category: "Help", shortcut: None, icon: "ℹ" },
     ]
 }

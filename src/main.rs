@@ -15,6 +15,7 @@ mod git;
 mod search;
 mod session;
 mod syntax;
+mod updater;
 mod viewers;
 
 use commands::CommandPalette;
@@ -22,6 +23,7 @@ use fuzzy::FuzzyFinder;
 use git::{FileGitStatus, GitRepoStatus};
 use search::ProjectSearch;
 use session::{SessionState, Settings, ThemeName};
+use updater::{AutoUpdater, UpdateState};
 use viewers::{ImageView, PdfView};
 
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
@@ -347,6 +349,7 @@ struct Editor {
     recent_projects: Vec<PathBuf>,
     split_view: bool,
     split_active: usize,
+    updater: AutoUpdater,
 
     tree_modal: Option<TreeModal>,
     modal_input: String,
@@ -354,6 +357,11 @@ struct Editor {
 
 impl Editor {
     fn new(arg: Option<PathBuf>, session: SessionState, ctx: egui::Context) -> Self {
+        let mut updater = AutoUpdater::new();
+        if session.settings.auto_check_updates {
+            updater.check_for_updates(env!("CARGO_PKG_VERSION"));
+        }
+
         let mut ed = Self {
             root: None,
             dir_cache: HashMap::new(),
@@ -390,6 +398,7 @@ impl Editor {
             recent_projects: session.recent_projects.clone(),
             split_view: false,
             split_active: 0,
+            updater,
 
             tree_modal: None,
             modal_input: String::new(),
@@ -2044,6 +2053,10 @@ impl Editor {
                 tab.syntax = syntax::detect(tab.path.as_deref(), &tab.text);
             }
             "preferences.open" => self.settings_open = true,
+            "app.check_updates" => {
+                self.updater.check_for_updates(env!("CARGO_PKG_VERSION"));
+                self.settings_open = true;
+            }
             "help.about" => self.about_open = true,
             _ => {}
         }
@@ -2410,7 +2423,60 @@ impl Editor {
                     }
                 });
 
-                ui.add_space(10.0);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Updates
+                ui.heading("Updates");
+                ui.horizontal(|ui| {
+                    match &self.updater.state.clone() {
+                        UpdateState::Idle => {
+                            if ui.button("⟳ Check for Updates").clicked() {
+                                self.updater.check_for_updates(env!("CARGO_PKG_VERSION"));
+                            }
+                        }
+                        UpdateState::Checking => {
+                            ui.spinner();
+                            ui.label("Checking yegz.com for updates…");
+                        }
+                        UpdateState::UpToDate => {
+                            ui.colored_label(Color32::from_rgb(152, 195, 121), "✓ You're on the latest version!");
+                            if ui.small_button("Check Again").clicked() {
+                                self.updater.check_for_updates(env!("CARGO_PKG_VERSION"));
+                            }
+                        }
+                        UpdateState::Available(info) => {
+                            ui.colored_label(Color32::from_rgb(97, 175, 239), format!("🚀 Version {} available!", info.version));
+                            if ui.button("⚡ Download & Update").clicked() {
+                                self.updater.download_and_install(info.clone());
+                            }
+                        }
+                        UpdateState::Downloading => {
+                            ui.spinner();
+                            ui.label(RichText::new("Downloading update…").color(Color32::from_rgb(229, 192, 123)));
+                        }
+                        UpdateState::ReadyToRestart { .. } => {
+                            ui.colored_label(Color32::from_rgb(152, 195, 121), "✅ Update downloaded!");
+                            if ui.button("🔄 Restart & Apply").clicked() {
+                                self.save_session_state();
+                                let _ = self.updater.apply_and_restart();
+                            }
+                        }
+                        UpdateState::Error(err) => {
+                            ui.colored_label(Color32::from_rgb(224, 108, 117), format!("⚠ {err}"));
+                            if ui.small_button("Retry").clicked() {
+                                self.updater.check_for_updates(env!("CARGO_PKG_VERSION"));
+                            }
+                        }
+                    }
+                });
+
+                if ui.checkbox(&mut self.settings.auto_check_updates, "Automatically check for updates on startup").changed() {
+                    changed = true;
+                }
+
+                ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
 
@@ -2510,6 +2576,46 @@ impl Editor {
                         ui.end_row();
                     });
 
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    match &self.updater.state.clone() {
+                        UpdateState::Idle => {
+                            if ui.button("⟳ Check for Updates").clicked() {
+                                self.updater.check_for_updates(env!("CARGO_PKG_VERSION"));
+                            }
+                        }
+                        UpdateState::Checking => {
+                            ui.spinner();
+                            ui.label("Checking…");
+                        }
+                        UpdateState::UpToDate => {
+                            ui.colored_label(Color32::from_rgb(152, 195, 121), "✓ Up to date");
+                        }
+                        UpdateState::Available(info) => {
+                            ui.colored_label(Color32::from_rgb(97, 175, 239), format!("🚀 v{} available", info.version));
+                            if ui.button("⚡ Update").clicked() {
+                                self.updater.download_and_install(info.clone());
+                            }
+                        }
+                        UpdateState::Downloading => {
+                            ui.spinner();
+                            ui.label("Downloading…");
+                        }
+                        UpdateState::ReadyToRestart { .. } => {
+                            if ui.button("🔄 Restart to Update").clicked() {
+                                self.save_session_state();
+                                let _ = self.updater.apply_and_restart();
+                            }
+                        }
+                        UpdateState::Error(err) => {
+                            ui.colored_label(Color32::from_rgb(224, 108, 117), "⚠ Check failed").on_hover_text(err);
+                            if ui.small_button("Retry").clicked() {
+                                self.updater.check_for_updates(env!("CARGO_PKG_VERSION"));
+                            }
+                        }
+                    }
+                });
+
                 ui.add_space(10.0);
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2518,6 +2624,78 @@ impl Editor {
                     }
                 });
             });
+    }
+
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        if self.updater.banner_dismissed {
+            return;
+        }
+
+        match &self.updater.state.clone() {
+            UpdateState::Available(info) => {
+                egui::Panel::top("update_banner")
+                    .frame(
+                        egui::Frame::NONE
+                            .fill(Color32::from_rgb(33, 44, 66))
+                            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(97, 175, 239)))
+                            .inner_margin(egui::Margin::symmetric(12, 6)),
+                    )
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("🚀").size(14.0));
+                            ui.label(RichText::new(format!("Yegz v{} is available!", info.version)).strong().color(Color32::from_rgb(97, 175, 239)));
+                            ui.label(RichText::new(&info.notes).small().color(Color32::from_rgb(200, 210, 225)));
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("×").on_hover_text("Dismiss").clicked() {
+                                    self.updater.banner_dismissed = true;
+                                }
+                                if ui.button("⚡ Update Now").on_hover_text("Download and install update automatically").clicked() {
+                                    self.updater.download_and_install(info.clone());
+                                }
+                            });
+                        });
+                    });
+            }
+            UpdateState::Downloading => {
+                egui::Panel::top("update_banner_dl")
+                    .frame(
+                        egui::Frame::NONE
+                            .fill(Color32::from_rgb(40, 44, 52))
+                            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(229, 192, 123)))
+                            .inner_margin(egui::Margin::symmetric(12, 6)),
+                    )
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new("Downloading Yegz update in background…").strong().color(Color32::from_rgb(229, 192, 123)));
+                        });
+                    });
+            }
+            UpdateState::ReadyToRestart { .. } => {
+                egui::Panel::top("update_banner_ready")
+                    .frame(
+                        egui::Frame::NONE
+                            .fill(Color32::from_rgb(30, 50, 40))
+                            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(152, 195, 121)))
+                            .inner_margin(egui::Margin::symmetric(12, 6)),
+                    )
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("✅").size(14.0));
+                            ui.label(RichText::new("Update downloaded and ready!").strong().color(Color32::from_rgb(152, 195, 121)));
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("🔄 Restart & Apply Update").clicked() {
+                                    self.save_session_state();
+                                    let _ = self.updater.apply_and_restart();
+                                }
+                            });
+                        });
+                    });
+            }
+            _ => {}
+        }
     }
 
     fn tree_actions_modal(&mut self, ctx: &egui::Context) {
@@ -2717,6 +2895,7 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.updater.poll();
 
         // Check for dropped files (drag and drop from Finder)
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
@@ -2794,6 +2973,8 @@ impl eframe::App for Editor {
                     .inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 0 }),
             )
             .show(ui, |ui| self.tab_bar(ui));
+
+        self.update_banner(ui);
 
         if self.find_open {
             egui::Panel::bottom("find").show(ui, |ui| self.find_bar(ui));

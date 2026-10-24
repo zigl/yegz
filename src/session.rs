@@ -54,6 +54,8 @@ pub struct Settings {
     pub show_line_numbers: bool,
     #[serde(default = "default_true")]
     pub auto_close_pairs: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 }
 
 fn default_true() -> bool {
@@ -69,6 +71,7 @@ impl Default for Settings {
             word_wrap: false,
             show_line_numbers: true,
             auto_close_pairs: true,
+            auto_check_updates: true,
         }
     }
 }
@@ -153,6 +156,7 @@ mod tests {
                 word_wrap: true,
                 show_line_numbers: true,
                 auto_close_pairs: true,
+                auto_check_updates: true,
             },
             recent_files: vec![PathBuf::from("/test/a.rs")],
             recent_projects: vec![PathBuf::from("/test")],
