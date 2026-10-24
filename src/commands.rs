@@ -102,6 +102,8 @@ pub fn all_commands() -> Vec<EditorCommand> {
         // View & Layout
         EditorCommand { id: "view.toggle_sidebar", title: "Toggle File Tree Sidebar", category: "View", shortcut: Some("⌘B"), icon: "◧" },
         EditorCommand { id: "view.toggle_split", title: "Toggle Split View (Side-by-Side)", category: "View", shortcut: None, icon: "◫" },
+        EditorCommand { id: "view.toggle_terminal", title: "Toggle Terminal & Tasks Drawer", category: "View", shortcut: Some("⌃`"), icon: "💻" },
+        EditorCommand { id: "terminal.clear", title: "Clear Terminal Output", category: "Terminal", shortcut: None, icon: "🧹" },
         EditorCommand { id: "view.toggle_word_wrap", title: "Toggle Word Wrap", category: "View", shortcut: None, icon: "↩" },
         EditorCommand { id: "view.toggle_line_numbers", title: "Toggle Line Numbers", category: "View", shortcut: None, icon: "#" },
 
