@@ -1317,14 +1317,9 @@ impl Editor {
                 self.show_sidebar = !self.show_sidebar;
             }
 
-            self.language_picker(ui);
-
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("⚙ Settings").on_hover_text("Preferences & Themes (⌘,)").clicked() {
                     self.settings_open = !self.settings_open;
-                }
-                if let Some(ref branch) = self.git.branch {
-                    ui.label(RichText::new(format!(" {branch}")).small().color(Color32::from_rgb(97, 175, 239)));
                 }
             });
         });
@@ -1753,7 +1748,7 @@ impl Editor {
 
     fn language_picker(&mut self, ui: &mut egui::Ui) {
         let current = self.tabs[self.active].syntax.clone();
-        let label = RichText::new(format!("{current} ▾")).strong().color(Color32::from_rgb(97, 175, 239));
+        let label = RichText::new(format!("{current} ▾")).small().color(Color32::from_rgb(97, 175, 239));
         ui.menu_button(label, |ui| {
             let r = ui.add(egui::TextEdit::singleline(&mut self.lang_filter).hint_text("Filter languages…").desired_width(200.0));
             r.request_focus();
@@ -1776,7 +1771,7 @@ impl Editor {
                 self.lang_filter.clear();
                 ui.close();
             }
-        });
+        }).response.on_hover_text("Select Language Mode");
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -1792,6 +1787,23 @@ impl Editor {
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+
+            if let Some(ref branch) = self.git.branch {
+                let has_changes = !self.git.file_statuses.is_empty();
+                let branch_text = if has_changes {
+                    format!(" {branch} *")
+                } else {
+                    format!(" {branch}")
+                };
+                let branch_color = if has_changes {
+                    Color32::from_rgb(229, 192, 123)
+                } else {
+                    Color32::from_rgb(97, 175, 239)
+                };
+                ui.label(RichText::new(branch_text).small().strong().color(branch_color))
+                    .on_hover_text(if has_changes { "Git branch (modified files)" } else { "Git branch (clean working tree)" });
+                ui.label(sep.clone());
+            }
 
             let (l, c, bracket) = CURSOR.with(|c| *c.borrow());
             ui.label(RichText::new(format!("Ln {l}, Col {c}")).small());
@@ -1834,20 +1846,8 @@ impl Editor {
 
                 if let Some(info) = media_info {
                     ui.label(RichText::new(info).small());
-                    return;
-                }
-
-                let syntax_label = format!("{} · Two-Face Highlighting", tab.syntax);
-                ui.label(RichText::new(syntax_label).small());
-
-                if self.git.branch.is_some() {
-                    let has_changes = !self.git.file_statuses.is_empty();
-                    if has_changes {
-                        ui.label(RichText::new("Git: modified").small().color(Color32::from_rgb(229, 192, 123)));
-                    } else {
-                        ui.label(RichText::new("Git: clean").small().color(Color32::from_rgb(152, 195, 121)));
-                    }
-                    ui.label(sep.clone());
+                } else {
+                    self.language_picker(ui);
                 }
             });
         });
