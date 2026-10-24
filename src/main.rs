@@ -30,11 +30,18 @@ fn main() -> eframe::Result {
     let session = session::load_session();
     let initial_size = session.window_size;
 
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_512.png")).ok();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Yegz")
+        .with_inner_size(if initial_size[0] > 100.0 { initial_size } else { [1100.0, 720.0] })
+        .with_min_inner_size([400.0, 300.0]);
+
+    if let Some(icon) = icon {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Yegz")
-            .with_inner_size(if initial_size[0] > 100.0 { initial_size } else { [1100.0, 720.0] })
-            .with_min_inner_size([400.0, 300.0]),
+        viewport,
         ..Default::default()
     };
 
